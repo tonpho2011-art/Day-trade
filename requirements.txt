@@ -4,3 +4,5 @@ yfinance
 backtesting
 matplotlib
 python-dotenv
+feedparser
+tabulate
