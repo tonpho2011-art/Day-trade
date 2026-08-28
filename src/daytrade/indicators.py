@@ -46,6 +46,7 @@ def build_signal(df: pd.DataFrame, sma_fast: int = 10, sma_slow: int = 30) -> di
     score = 0
     reasons = []
 
+    # Trend: +/-1
     if fast.iloc[last] > slow.iloc[last]:
         score += 1
         reasons.append(f"Uptrend: {sma_fast}-day SMA ({fast.iloc[last]:.2f}) above {sma_slow}-day SMA ({slow.iloc[last]:.2f})")
@@ -53,16 +54,23 @@ def build_signal(df: pd.DataFrame, sma_fast: int = 10, sma_slow: int = 30) -> di
         score -= 1
         reasons.append(f"Downtrend: {sma_fast}-day SMA ({fast.iloc[last]:.2f}) below {sma_slow}-day SMA ({slow.iloc[last]:.2f})")
 
+    # RSI: momentum zone, not a simple overbought=bad rule. Strong uptrends
+    # legitimately run hot (RSI 50-85) -- that's confirmation, not a warning.
+    # Only the extremes (blow-off top >=85, breakdown <30) count against it.
     rsi_last = r.iloc[last]
-    if rsi_last < 30:
-        score += 1
-        reasons.append(f"RSI {rsi_last:.1f} is oversold (<30), possible bounce")
-    elif rsi_last > 70:
+    if rsi_last >= 85:
         score -= 1
-        reasons.append(f"RSI {rsi_last:.1f} is overbought (>70), possible pullback")
+        reasons.append(f"RSI {rsi_last:.1f} is extremely overbought (>=85), blow-off/pullback risk")
+    elif rsi_last >= 45:
+        score += 1
+        reasons.append(f"RSI {rsi_last:.1f} shows strong bullish momentum")
+    elif rsi_last < 30:
+        score -= 1
+        reasons.append(f"RSI {rsi_last:.1f} shows bearish momentum / breakdown (<30)")
     else:
-        reasons.append(f"RSI {rsi_last:.1f} is neutral")
+        reasons.append(f"RSI {rsi_last:.1f} is neutral / weak")
 
+    # MACD: +/-1
     if macd_line.iloc[last] > signal_line.iloc[last]:
         score += 1
         reasons.append("MACD line above signal line (bullish momentum)")
@@ -70,14 +78,20 @@ def build_signal(df: pd.DataFrame, sma_fast: int = 10, sma_slow: int = 30) -> di
         score -= 1
         reasons.append("MACD line below signal line (bearish momentum)")
 
+    # Volume: confirms conviction behind the move, only ever adds
     vr_last = vol_ratio.iloc[last]
     if pd.notna(vr_last) and vr_last > 1.5:
+        score += 1
         reasons.append(f"Volume is {vr_last:.1f}x the 20-day average (move looks confirmed)")
     elif pd.notna(vr_last):
         reasons.append(f"Volume is {vr_last:.1f}x the 20-day average")
 
-    if score >= 2:
+    if score >= 3:
+        signal = "STRONG BUY"
+    elif score >= 2:
         signal = "BUY"
+    elif score <= -3:
+        signal = "STRONG SELL"
     elif score <= -2:
         signal = "SELL"
     else:
