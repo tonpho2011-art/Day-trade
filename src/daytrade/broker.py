@@ -40,13 +40,16 @@ def get_account_summary(client: TradingClient) -> dict:
 
 
 def get_open_positions(client: TradingClient) -> dict:
-    """symbol -> {'qty': float, 'market_value': float, 'unrealized_pl': float}"""
+    """symbol -> qty/market_value/unrealized P&L (dollar and %) /entry price"""
     positions = {}
     for p in client.get_all_positions():
         positions[p.symbol] = {
             "qty": float(p.qty),
             "market_value": float(p.market_value),
             "unrealized_pl": float(p.unrealized_pl),
+            "unrealized_plpc": float(p.unrealized_plpc),
+            "avg_entry_price": float(p.avg_entry_price),
+            "current_price": float(p.current_price),
         }
     return positions
 

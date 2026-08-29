@@ -3,23 +3,37 @@
 Scans a liquid universe (today's gainers/active/losers + the S&P 500) on
 5-minute candles, combining the SMA/RSI/MACD/volume signal engine with
 candlestick patterns (engulfing, hammer, shooting star, doji). Opens
-positions on STRONG BUY, exits on STRONG SELL, and auto-flattens
-(closes) every open position before market close so nothing is held
-overnight -- that's what makes this day-trading rather than swing
-trading.
+positions on STRONG BUY, and exits a held position on any of three
+independent triggers, whichever comes first:
+  1. Stop-loss  -- price drops --stop-loss-pct from entry
+  2. Take-profit -- price rises --take-profit-pct from entry
+  3. STRONG SELL signal flips on
+Every open position is also force-flattened before market close so
+nothing is held overnight -- that's what makes this day-trading rather
+than swing trading. Held positions are always re-checked for exits every
+cycle even if they've dropped off the scanned universe (e.g. a stock
+that cooled off and fell out of today's top movers) -- only the entry
+side depends on being in the scan.
 
 SAFETY: by default this is a DRY RUN -- it prints what it would do and
 submits nothing. Pass --live-paper to actually place orders, and even
 then it only ever talks to Alpaca's paper (fake money) endpoint -- see
 src/daytrade/broker.py. It always connects to your Alpaca account
-(read-only unless --live-paper) since it needs the market clock and
-your current positions to make decisions.
+(read-only unless --live-paper) since it needs the market clock, your
+current positions, and buying power to make decisions.
+
+LEVERAGE: --leverage multiplies --cash-per-trade (e.g. cash-per-trade
+500 * leverage 3 = $1500 notional per position). This uses Alpaca's
+margin buying power, which is real leverage even on a paper account --
+it amplifies both gains AND losses by the same multiple, and the bot
+will refuse a buy if it would exceed remaining buying power rather than
+partially fill.
 
 Usage:
   python autotrade.py                        Dry run, loops every 5 min during market hours
   python autotrade.py --live-paper            Actually trade on paper, same loop
   python autotrade.py --live-paper --once     Single pass then exit (for testing)
-  python autotrade.py --universe-size 60 --cash-per-trade 300 --max-positions 6
+  python autotrade.py --cash-per-trade 500 --leverage 3 --stop-loss-pct 1.5 --take-profit-pct 3
 
 This is a simple rule-based heuristic on top of free delayed/real-time
 data. It will generate losing trades -- that's normal, not a bug. Do not
@@ -28,6 +42,7 @@ point this at a real-money account.
 import argparse
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 sys.path.insert(0, "src")
@@ -40,6 +55,36 @@ from daytrade.tradelog import log_trade
 from daytrade.universe import get_daytrade_universe
 
 
+@dataclass
+class Config:
+    live: bool
+    universe_size: int
+    cash_per_trade: float
+    leverage: float
+    max_positions: int
+    stop_loss_pct: float
+    take_profit_pct: float
+    flatten_buffer: int
+    no_entry_buffer: int
+    ignore_market_hours: bool
+
+    @property
+    def notional_per_trade(self) -> float:
+        return self.cash_per_trade * self.leverage
+
+
+def _log(symbol: str, signal, score, price, action: str, live: bool) -> None:
+    log_trade({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "symbol": symbol,
+        "signal": signal,
+        "score": score,
+        "price": price,
+        "action": action,
+        "mode": "live-paper" if live else "dry-run",
+    })
+
+
 def flatten_all(client, positions: dict, live: bool) -> None:
     print(f"Within the close window -- flattening {len(positions)} open position(s).")
     if live:
@@ -49,23 +94,43 @@ def flatten_all(client, positions: dict, live: bool) -> None:
             print(f"  -> flatten FAILED: {e}")
             return
     for symbol in positions:
-        log_trade({
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "symbol": symbol,
-            "signal": "",
-            "score": "",
-            "price": "",
-            "action": "FLATTEN" if live else "FLATTEN_DRY_RUN",
-            "mode": "live-paper" if live else "dry-run",
-        })
+        _log(symbol, "", "", "", "FLATTEN" if live else "FLATTEN_DRY_RUN", live)
 
 
-def run_cycle(client, universe_size: int, cash_per_trade: float, max_positions: int,
-              flatten_buffer: int, no_entry_buffer: int, live: bool,
-              ignore_market_hours: bool = False) -> None:
+def check_risk_exits(client, positions: dict, cfg: Config) -> set:
+    """Stop-loss / take-profit checks on every currently held position,
+    independent of the scanned universe. Returns the set of symbols
+    exited so the main loop doesn't double-process them."""
+    exited = set()
+    for symbol, pos in positions.items():
+        plpc = pos["unrealized_plpc"] * 100  # decimal -> percent
+        if plpc <= -cfg.stop_loss_pct:
+            reason, action = "stop-loss", "SELL_STOPLOSS"
+        elif plpc >= cfg.take_profit_pct:
+            reason, action = "take-profit", "SELL_TAKEPROFIT"
+        else:
+            continue
+
+        print(f"  [{symbol}] unrealized {plpc:+.2f}% hit {reason} -> SELL")
+        if cfg.live:
+            try:
+                broker.close_position(client, symbol)
+                print(f"    -> submitted paper SELL (close position) for {symbol}")
+            except Exception as e:
+                print(f"    -> SELL order FAILED: {e}")
+                action = "SELL_FAILED"
+        else:
+            print(f"    -> [dry run] would SELL/close position in {symbol} ({reason})")
+
+        _log(symbol, reason, f"{plpc:.2f}%", pos["current_price"], action, cfg.live)
+        exited.add(symbol)
+    return exited
+
+
+def run_cycle(client, cfg: Config) -> None:
     mtc = broker.minutes_to_close(client)
     if mtc is None:
-        if not ignore_market_hours:
+        if not cfg.ignore_market_hours:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Market closed -- idling.")
             return
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Market closed, but --ignore-market-hours is set -- "
@@ -74,29 +139,45 @@ def run_cycle(client, universe_size: int, cash_per_trade: float, max_positions: 
 
     positions = broker.get_open_positions(client)
 
-    if mtc <= flatten_buffer:
+    if mtc <= cfg.flatten_buffer:
         if positions:
-            flatten_all(client, positions, live)
+            flatten_all(client, positions, cfg.live)
         else:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] Near close ({mtc:.0f} min left), no positions to flatten.")
         return
 
-    allow_new_entries = mtc > no_entry_buffer
-    symbols = get_daytrade_universe(max_count=universe_size)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning {len(symbols)} symbols "
+    # Risk exits run on every held position first, regardless of whether
+    # it's still in today's scanned universe.
+    exited = check_risk_exits(client, positions, cfg) if positions else set()
+    for symbol in exited:
+        del positions[symbol]
+
+    allow_new_entries = mtc > cfg.no_entry_buffer
+    universe = get_daytrade_universe(max_count=cfg.universe_size)
+    # Always re-check currently held tickers too, so a STRONG SELL exit
+    # isn't missed just because a stock fell out of today's movers list.
+    scan_symbols = list(dict.fromkeys(universe + list(positions.keys())))
+
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Scanning {len(scan_symbols)} symbols "
           f"({mtc:.0f} min to close, new entries {'allowed' if allow_new_entries else 'paused'})...")
 
-    results = batch_intraday_signals(symbols)
+    acct = broker.get_account_summary(client)
+    remaining_bp = acct["buying_power"]
+
+    results = batch_intraday_signals(scan_symbols)
     open_count = len(positions)
     actionable = 0
 
     for r in results:
         symbol = r["symbol"]
+        if symbol in exited:
+            continue
         signal = r["signal"]
         has_position = symbol in positions
         action = "NONE"
 
-        if signal == "STRONG BUY" and not has_position and allow_new_entries and open_count < max_positions:
+        if (signal == "STRONG BUY" and not has_position and allow_new_entries
+                and open_count < cfg.max_positions and remaining_bp >= cfg.notional_per_trade):
             action = "BUY"
         elif signal == "STRONG SELL" and has_position:
             action = "SELL"
@@ -106,40 +187,34 @@ def run_cycle(client, universe_size: int, cash_per_trade: float, max_positions: 
         actionable += 1
 
         print(f"  [{symbol}] price={r['price']:.2f} signal={signal} (score {r['score']}) -> {action}")
-        row = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "symbol": symbol,
-            "signal": signal,
-            "score": r["score"],
-            "price": r["price"],
-            "action": action,
-            "mode": "live-paper" if live else "dry-run",
-        }
 
         if action == "BUY":
-            if live:
+            if cfg.live:
                 try:
-                    broker.buy_notional(client, symbol, cash_per_trade)
+                    broker.buy_notional(client, symbol, cfg.notional_per_trade)
                     open_count += 1
-                    print(f"    -> submitted paper BUY order for ${cash_per_trade:.2f} of {symbol}")
+                    remaining_bp -= cfg.notional_per_trade
+                    print(f"    -> submitted paper BUY order for ${cfg.notional_per_trade:.2f} "
+                          f"of {symbol} ({cfg.leverage}x leverage)")
                 except Exception as e:
                     print(f"    -> BUY order FAILED: {e}")
-                    row["action"] = "BUY_FAILED"
+                    action = "BUY_FAILED"
             else:
-                print(f"    -> [dry run] would BUY ${cash_per_trade:.2f} of {symbol}")
+                print(f"    -> [dry run] would BUY ${cfg.notional_per_trade:.2f} of {symbol} "
+                      f"({cfg.leverage}x leverage)")
 
         elif action == "SELL":
-            if live:
+            if cfg.live:
                 try:
                     broker.close_position(client, symbol)
                     print(f"    -> submitted paper SELL (close position) for {symbol}")
                 except Exception as e:
                     print(f"    -> SELL order FAILED: {e}")
-                    row["action"] = "SELL_FAILED"
+                    action = "SELL_FAILED"
             else:
                 print(f"    -> [dry run] would SELL/close position in {symbol}")
 
-        log_trade(row)
+        _log(symbol, signal, r["score"], r["price"], action, cfg.live)
 
     if actionable == 0:
         print("  No actionable signals this pass.")
@@ -156,9 +231,15 @@ def main():
     parser.add_argument("--universe-size", type=int, default=100,
                         help="Max number of symbols to scan each pass (default: 100)")
     parser.add_argument("--cash-per-trade", type=float, default=500.0,
-                        help="Dollar amount per new position (default: 500)")
+                        help="Base dollar amount per new position before leverage (default: 500)")
+    parser.add_argument("--leverage", type=float, default=1.0,
+                        help="Multiplies --cash-per-trade using margin buying power (default: 1.0, no leverage)")
     parser.add_argument("--max-positions", type=int, default=8,
                         help="Max concurrent open positions (default: 8)")
+    parser.add_argument("--stop-loss-pct", type=float, default=1.5,
+                        help="Close a position if it drops this %% below entry (default: 1.5)")
+    parser.add_argument("--take-profit-pct", type=float, default=3.0,
+                        help="Close a position if it rises this %% above entry (default: 3.0)")
     parser.add_argument("--flatten-minutes-before-close", type=int, default=5,
                         help="Close every open position once this close to market close (default: 5)")
     parser.add_argument("--no-new-entries-minutes-before-close", type=int, default=15,
@@ -173,20 +254,27 @@ def main():
     mode = "LIVE PAPER TRADING" if args.live_paper else "DRY RUN (no orders will be submitted)"
     print(f"Connected to Alpaca PAPER account -- cash: ${acct['cash']:.2f}  "
           f"equity: ${acct['equity']:.2f}  buying power: ${acct['buying_power']:.2f}")
-    print(f"Mode: {mode}\n")
+    print(f"Mode: {mode}")
+    print(f"Per-trade size: ${args.cash_per_trade:.2f} x {args.leverage}x leverage = "
+          f"${args.cash_per_trade * args.leverage:.2f} notional  |  "
+          f"stop-loss {args.stop_loss_pct}%  take-profit {args.take_profit_pct}%\n")
+
+    cfg = Config(
+        live=args.live_paper,
+        universe_size=args.universe_size,
+        cash_per_trade=args.cash_per_trade,
+        leverage=args.leverage,
+        max_positions=args.max_positions,
+        stop_loss_pct=args.stop_loss_pct,
+        take_profit_pct=args.take_profit_pct,
+        flatten_buffer=args.flatten_minutes_before_close,
+        no_entry_buffer=args.no_new_entries_minutes_before_close,
+        ignore_market_hours=args.ignore_market_hours,
+    )
 
     try:
         while True:
-            run_cycle(
-                client,
-                args.universe_size,
-                args.cash_per_trade,
-                args.max_positions,
-                args.flatten_minutes_before_close,
-                args.no_new_entries_minutes_before_close,
-                args.live_paper,
-                args.ignore_market_hours,
-            )
+            run_cycle(client, cfg)
             if args.once:
                 break
             print(f"Sleeping {args.interval_minutes} minute(s)...\n")
