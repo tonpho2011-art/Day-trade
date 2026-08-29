@@ -22,11 +22,9 @@ starting point for experimentation on a paper account, not a finished
 trading system.
 """
 import argparse
-import csv
 import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 sys.path.insert(0, "src")
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
@@ -35,18 +33,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 from daytrade import broker
 from daytrade.data import get_ohlcv
 from daytrade.indicators import build_signal
-
-LOG_PATH = Path("data/trade_log.csv")
-
-
-def log_trade(row: dict) -> None:
-    LOG_PATH.parent.mkdir(exist_ok=True)
-    is_new = not LOG_PATH.exists()
-    with open(LOG_PATH, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-        if is_new:
-            writer.writeheader()
-        writer.writerow(row)
+from daytrade.tradelog import log_trade
 
 
 def run_once(tickers: list[str], client, cash_per_trade: float, max_positions: int, live: bool) -> None:

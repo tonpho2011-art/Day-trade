@@ -29,6 +29,18 @@ def volume_ratio(volume: pd.Series, window: int = 20) -> pd.Series:
     return volume / volume.rolling(window).mean()
 
 
+def signal_from_score(score: int) -> str:
+    if score >= 3:
+        return "STRONG BUY"
+    if score >= 2:
+        return "BUY"
+    if score <= -3:
+        return "STRONG SELL"
+    if score <= -2:
+        return "SELL"
+    return "HOLD"
+
+
 def build_signal(df: pd.DataFrame, sma_fast: int = 10, sma_slow: int = 30) -> dict:
     """Combine trend/momentum/volume into a BUY/SELL/HOLD call with reasons.
 
@@ -86,19 +98,8 @@ def build_signal(df: pd.DataFrame, sma_fast: int = 10, sma_slow: int = 30) -> di
     elif pd.notna(vr_last):
         reasons.append(f"Volume is {vr_last:.1f}x the 20-day average")
 
-    if score >= 3:
-        signal = "STRONG BUY"
-    elif score >= 2:
-        signal = "BUY"
-    elif score <= -3:
-        signal = "STRONG SELL"
-    elif score <= -2:
-        signal = "SELL"
-    else:
-        signal = "HOLD"
-
     return {
-        "signal": signal,
+        "signal": signal_from_score(score),
         "score": score,
         "reasons": reasons,
         "price": close.iloc[last],

@@ -7,7 +7,8 @@ single threaded yfinance download and score them locally.
 import pandas as pd
 import yfinance as yf
 
-from daytrade.indicators import build_signal
+from daytrade import candles
+from daytrade.indicators import build_signal, signal_from_score
 from daytrade.news import get_headlines, score_sentiment
 from daytrade.screener import top_movers
 
@@ -65,6 +66,80 @@ def batch_signals(symbols: list[str], meta: dict | None = None, period: str = "6
             if len(df) < MIN_BARS or "Close" not in df or "Volume" not in df:
                 continue
             result = {"symbol": symbol, **meta.get(symbol, {}), **build_signal(df)}
+        except Exception:
+            continue
+        results.append(result)
+    return results
+
+
+def batch_intraday_signals(
+    symbols: list[str],
+    meta: dict | None = None,
+    period: str = "5d",
+    interval: str = "5m",
+    sma_fast: int = 6,
+    sma_slow: int = 24,
+) -> list[dict]:
+    """Like batch_signals, but on intraday bars and with candlestick
+    patterns on the latest bar layered onto the score/signal/reasons.
+
+    Default sma_fast/sma_slow (6/24 bars) on 5-minute bars is roughly a
+    30-minute vs 2-hour trend read -- tune via the args if you change
+    `interval`.
+    """
+    symbols = list(dict.fromkeys(s for s in symbols if s))
+    if not symbols:
+        return []
+
+    meta = meta or {}
+    try:
+        data = yf.download(
+            tickers=symbols,
+            period=period,
+            interval=interval,
+            group_by="ticker",
+            threads=True,
+            auto_adjust=True,
+            progress=False,
+        )
+    except Exception:
+        return []
+
+    if data is None or data.empty:
+        return []
+
+    min_bars = max(MIN_BARS, sma_slow + 5)
+    results = []
+    for symbol in symbols:
+        try:
+            df = _slice_symbol(data, symbol)
+            if len(df) < min_bars or "Close" not in df or "Volume" not in df:
+                continue
+
+            base = build_signal(df, sma_fast=sma_fast, sma_slow=sma_slow)
+            patterns = candles.detect_patterns(df)
+            bullish = patterns["bullish_engulfing"] or patterns["hammer"]
+            bearish = patterns["bearish_engulfing"] or patterns["shooting_star"]
+
+            score = base["score"]
+            pattern_notes = []
+            if bullish:
+                score += 1
+                name = "bullish engulfing" if patterns["bullish_engulfing"] else "hammer"
+                pattern_notes.append(f"Candlestick: {name} on the latest bar (bullish)")
+            if bearish:
+                score -= 1
+                name = "bearish engulfing" if patterns["bearish_engulfing"] else "shooting star"
+                pattern_notes.append(f"Candlestick: {name} on the latest bar (bearish)")
+            if patterns["doji"] and not bullish and not bearish:
+                pattern_notes.append("Candlestick: doji on the latest bar (indecision)")
+
+            base["score"] = score
+            base["signal"] = signal_from_score(score)
+            base["reasons"] = base["reasons"] + pattern_notes
+            base["patterns"] = patterns
+
+            result = {"symbol": symbol, **meta.get(symbol, {}), **base}
         except Exception:
             continue
         results.append(result)

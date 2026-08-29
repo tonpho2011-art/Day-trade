@@ -63,3 +63,15 @@ def buy_notional(client: TradingClient, symbol: str, dollars: float):
 
 def close_position(client: TradingClient, symbol: str):
     return client.close_position(symbol)
+
+
+def close_all_positions(client: TradingClient):
+    return client.close_all_positions(cancel_orders=True)
+
+
+def minutes_to_close(client: TradingClient) -> float | None:
+    """Minutes until the market closes, or None if the market is shut."""
+    clock = client.get_clock()
+    if not clock.is_open:
+        return None
+    return (clock.next_close - clock.timestamp).total_seconds() / 60
