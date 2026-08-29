@@ -4,9 +4,14 @@ from pathlib import Path
 
 LOG_PATH = Path("data/trade_log.csv")
 
+_initialized: set[Path] = set()
+
 
 def log_trade(row: dict, path: Path = LOG_PATH) -> None:
-    path.parent.mkdir(exist_ok=True)
+    if path not in _initialized:
+        path.parent.mkdir(exist_ok=True)
+        _initialized.add(path)
+
     is_new = not path.exists()
     with open(path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(row.keys()))

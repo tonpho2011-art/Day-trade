@@ -32,6 +32,24 @@ def _slice_symbol(data: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return df.dropna()
 
 
+def _batch_download(symbols: list[str], period: str, interval: str) -> pd.DataFrame | None:
+    """Dedup symbols and download them all in one threaded call. Returns
+    None if the download failed or came back empty."""
+    try:
+        data = yf.download(
+            tickers=symbols,
+            period=period,
+            interval=interval,
+            group_by="ticker",
+            threads=True,
+            auto_adjust=True,
+            progress=False,
+        )
+    except Exception:
+        return None
+    return None if data is None or data.empty else data
+
+
 def batch_signals(symbols: list[str], meta: dict | None = None, period: str = "6mo") -> list[dict]:
     """Download every symbol in one call and run build_signal on each.
 
@@ -43,20 +61,8 @@ def batch_signals(symbols: list[str], meta: dict | None = None, period: str = "6
         return []
 
     meta = meta or {}
-    try:
-        data = yf.download(
-            tickers=symbols,
-            period=period,
-            interval="1d",
-            group_by="ticker",
-            threads=True,
-            auto_adjust=True,
-            progress=False,
-        )
-    except Exception:
-        return []
-
-    if data is None or data.empty:
+    data = _batch_download(symbols, period, "1d")
+    if data is None:
         return []
 
     results = []
@@ -92,20 +98,8 @@ def batch_intraday_signals(
         return []
 
     meta = meta or {}
-    try:
-        data = yf.download(
-            tickers=symbols,
-            period=period,
-            interval=interval,
-            group_by="ticker",
-            threads=True,
-            auto_adjust=True,
-            progress=False,
-        )
-    except Exception:
-        return []
-
-    if data is None or data.empty:
+    data = _batch_download(symbols, period, interval)
+    if data is None:
         return []
 
     min_bars = max(MIN_BARS, sma_slow + 5)

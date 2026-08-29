@@ -36,6 +36,8 @@ def get_account_summary(client: TradingClient) -> dict:
         "cash": float(acct.cash),
         "equity": float(acct.equity),
         "buying_power": float(acct.buying_power),
+        "pattern_day_trader": bool(acct.pattern_day_trader),
+        "daytrade_count": int(acct.daytrade_count or 0),
     }
 
 
@@ -70,6 +72,26 @@ def close_position(client: TradingClient, symbol: str):
 
 def close_all_positions(client: TradingClient):
     return client.close_all_positions(cancel_orders=True)
+
+
+def safe_buy_notional(client: TradingClient, symbol: str, dollars: float) -> tuple[bool, str | None]:
+    """Submit a BUY, catching broker errors instead of letting them
+    propagate. Returns (ok, error_message)."""
+    try:
+        buy_notional(client, symbol, dollars)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def safe_close_position(client: TradingClient, symbol: str) -> tuple[bool, str | None]:
+    """Close a position, catching broker errors instead of letting them
+    propagate. Returns (ok, error_message)."""
+    try:
+        close_position(client, symbol)
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 
 def minutes_to_close(client: TradingClient) -> float | None:

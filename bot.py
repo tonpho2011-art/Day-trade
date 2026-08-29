@@ -31,8 +31,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
 from daytrade import broker
-from daytrade.data import get_ohlcv
-from daytrade.indicators import build_signal
+from daytrade.scan import batch_signals
 from daytrade.tradelog import log_trade
 
 
@@ -40,16 +39,14 @@ def run_once(tickers: list[str], client, cash_per_trade: float, max_positions: i
     positions = broker.get_open_positions(client) if client else {}
     open_count = len(positions)
 
-    for symbol in tickers:
-        symbol = symbol.upper()
-        try:
-            df = get_ohlcv(symbol, period="6mo", interval="1d")
-            tech = build_signal(df)
-        except Exception as e:
-            print(f"[{symbol}] skipped -- couldn't fetch/analyze: {e}")
-            continue
+    results = batch_signals([t.upper() for t in tickers])
+    found = {r["symbol"] for r in results}
+    for symbol in [t.upper() for t in tickers]:
+        if symbol not in found:
+            print(f"[{symbol}] skipped -- couldn't fetch/analyze (not enough history or a bad ticker)")
 
-        signal = tech["signal"]
+    for r in results:
+        symbol, signal = r["symbol"], r["signal"]
         has_position = symbol in positions
         action = "NONE"
 
@@ -58,38 +55,38 @@ def run_once(tickers: list[str], client, cash_per_trade: float, max_positions: i
         elif signal == "STRONG SELL" and has_position:
             action = "SELL"
 
-        print(f"[{symbol}] price={tech['price']:.2f} signal={signal} (score {tech['score']}) "
+        print(f"[{symbol}] price={r['price']:.2f} signal={signal} (score {r['score']}) "
               f"position={'yes' if has_position else 'no'} -> action={action}")
 
         row = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "symbol": symbol,
             "signal": signal,
-            "score": tech["score"],
-            "price": tech["price"],
+            "score": r["score"],
+            "price": r["price"],
             "action": action,
             "mode": "live-paper" if live else "dry-run",
         }
 
         if action == "BUY":
             if live:
-                try:
-                    broker.buy_notional(client, symbol, cash_per_trade)
+                ok, err = broker.safe_buy_notional(client, symbol, cash_per_trade)
+                if ok:
                     open_count += 1
                     print(f"  -> submitted paper BUY order for ${cash_per_trade:.2f} of {symbol}")
-                except Exception as e:
-                    print(f"  -> BUY order FAILED: {e}")
+                else:
+                    print(f"  -> BUY order FAILED: {err}")
                     row["action"] = "BUY_FAILED"
             else:
                 print(f"  -> [dry run] would BUY ${cash_per_trade:.2f} of {symbol}")
 
         elif action == "SELL":
             if live:
-                try:
-                    broker.close_position(client, symbol)
+                ok, err = broker.safe_close_position(client, symbol)
+                if ok:
                     print(f"  -> submitted paper SELL (close position) for {symbol}")
-                except Exception as e:
-                    print(f"  -> SELL order FAILED: {e}")
+                else:
+                    print(f"  -> SELL order FAILED: {err}")
                     row["action"] = "SELL_FAILED"
             else:
                 print(f"  -> [dry run] would SELL/close position in {symbol}")
@@ -123,16 +120,24 @@ def main():
     else:
         print("DRY RUN -- no orders will be submitted. Pass --live-paper to actually trade on paper.")
 
-    while True:
-        if client and not args.ignore_market_hours and not broker.is_market_open(client):
-            print("Market is closed -- skipping this pass. Use --ignore-market-hours to override for testing.")
-        else:
-            run_once(args.tickers, client, args.cash_per_trade, args.max_positions, args.live_paper)
+    try:
+        while True:
+            try:
+                if client and not args.ignore_market_hours and not broker.is_market_open(client):
+                    print("Market is closed -- skipping this pass. Use --ignore-market-hours to override for testing.")
+                else:
+                    run_once(args.tickers, client, args.cash_per_trade, args.max_positions, args.live_paper)
+            except Exception as e:
+                print(f"Cycle failed, will retry next interval: {e}")
+                if not args.loop:
+                    raise
 
-        if not args.loop:
-            break
-        print(f"\nSleeping {args.interval_minutes} minutes...\n")
-        time.sleep(args.interval_minutes * 60)
+            if not args.loop:
+                break
+            print(f"\nSleeping {args.interval_minutes} minutes...\n")
+            time.sleep(args.interval_minutes * 60)
+    except KeyboardInterrupt:
+        print("\nStopped.")
 
 
 if __name__ == "__main__":

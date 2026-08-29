@@ -7,6 +7,7 @@ breadth. That's a stand-in for "the whole market", not literally it.
 """
 import io
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -54,11 +55,20 @@ def get_daytrade_universe(max_count: int = 100) -> list[str]:
     out with S&P 500 names for breadth, capped at max_count."""
     symbols: list[str] = []
     seen: set[str] = set()
+    kinds = ("gainers", "active", "losers")
+    per_kind = max(10, max_count // 3)
 
-    for kind in ("gainers", "active", "losers"):
+    def _fetch(kind: str):
         try:
-            df = top_movers(kind, count=max(10, max_count // 3))
+            return top_movers(kind, count=per_kind)
         except Exception:
+            return None
+
+    with ThreadPoolExecutor(max_workers=len(kinds)) as pool:
+        dfs = pool.map(_fetch, kinds)
+
+    for df in dfs:
+        if df is None:
             continue
         for s in df["symbol"].tolist():
             if s and s not in seen:

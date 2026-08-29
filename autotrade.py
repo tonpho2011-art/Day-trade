@@ -88,13 +88,17 @@ def _log(symbol: str, signal, score, price, action: str, live: bool) -> None:
 def flatten_all(client, positions: dict, live: bool) -> None:
     print(f"Within the close window -- flattening {len(positions)} open position(s).")
     if live:
+        ok, err = True, None
         try:
             broker.close_all_positions(client)
         except Exception as e:
-            print(f"  -> flatten FAILED: {e}")
+            ok, err = False, str(e)
+        if not ok:
+            print(f"  -> flatten FAILED: {err}")
             return
-    for symbol in positions:
-        _log(symbol, "", "", "", "FLATTEN" if live else "FLATTEN_DRY_RUN", live)
+    for symbol, pos in positions.items():
+        _log(symbol, "flatten (end of day)", "", pos["current_price"],
+             "FLATTEN" if live else "FLATTEN_DRY_RUN", live)
 
 
 def check_risk_exits(client, positions: dict, cfg: Config) -> set:
@@ -113,16 +117,16 @@ def check_risk_exits(client, positions: dict, cfg: Config) -> set:
 
         print(f"  [{symbol}] unrealized {plpc:+.2f}% hit {reason} -> SELL")
         if cfg.live:
-            try:
-                broker.close_position(client, symbol)
+            ok, err = broker.safe_close_position(client, symbol)
+            if ok:
                 print(f"    -> submitted paper SELL (close position) for {symbol}")
-            except Exception as e:
-                print(f"    -> SELL order FAILED: {e}")
+            else:
+                print(f"    -> SELL order FAILED: {err}")
                 action = "SELL_FAILED"
         else:
             print(f"    -> [dry run] would SELL/close position in {symbol} ({reason})")
 
-        _log(symbol, reason, f"{plpc:.2f}%", pos["current_price"], action, cfg.live)
+        _log(symbol, f"{reason} ({plpc:+.2f}%)", "", pos["current_price"], action, cfg.live)
         exited.add(symbol)
     return exited
 
@@ -164,6 +168,20 @@ def run_cycle(client, cfg: Config) -> None:
     acct = broker.get_account_summary(client)
     remaining_bp = acct["buying_power"]
 
+    # PDT protection: a sub-$25k account gets flagged after 4 day trades in
+    # 5 business days, and Alpaca starts rejecting orders. Stop opening NEW
+    # positions once we're close to that limit rather than let orders fail
+    # opaquely; existing positions can still be exited.
+    pdt_blocked = (
+        acct["equity"] < 25000
+        and acct["pattern_day_trader"]
+        and acct["daytrade_count"] >= 3
+    )
+    if pdt_blocked and allow_new_entries:
+        print(f"  PDT guard: {acct['daytrade_count']} day trades already this week on a "
+              f"sub-$25k account -- pausing new entries to avoid an order rejection/lockout.")
+        allow_new_entries = False
+
     results = batch_intraday_signals(scan_symbols)
     open_count = len(positions)
     actionable = 0
@@ -190,14 +208,14 @@ def run_cycle(client, cfg: Config) -> None:
 
         if action == "BUY":
             if cfg.live:
-                try:
-                    broker.buy_notional(client, symbol, cfg.notional_per_trade)
+                ok, err = broker.safe_buy_notional(client, symbol, cfg.notional_per_trade)
+                if ok:
                     open_count += 1
                     remaining_bp -= cfg.notional_per_trade
                     print(f"    -> submitted paper BUY order for ${cfg.notional_per_trade:.2f} "
                           f"of {symbol} ({cfg.leverage}x leverage)")
-                except Exception as e:
-                    print(f"    -> BUY order FAILED: {e}")
+                else:
+                    print(f"    -> BUY order FAILED: {err}")
                     action = "BUY_FAILED"
             else:
                 print(f"    -> [dry run] would BUY ${cfg.notional_per_trade:.2f} of {symbol} "
@@ -205,11 +223,11 @@ def run_cycle(client, cfg: Config) -> None:
 
         elif action == "SELL":
             if cfg.live:
-                try:
-                    broker.close_position(client, symbol)
+                ok, err = broker.safe_close_position(client, symbol)
+                if ok:
                     print(f"    -> submitted paper SELL (close position) for {symbol}")
-                except Exception as e:
-                    print(f"    -> SELL order FAILED: {e}")
+                else:
+                    print(f"    -> SELL order FAILED: {err}")
                     action = "SELL_FAILED"
             else:
                 print(f"    -> [dry run] would SELL/close position in {symbol}")
@@ -274,7 +292,15 @@ def main():
 
     try:
         while True:
-            run_cycle(client, cfg)
+            try:
+                run_cycle(client, cfg)
+            except Exception as e:
+                # A network blip or a bad API response must not silently
+                # kill the loop -- that would stop monitoring any open
+                # (possibly leveraged) positions until someone notices.
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Cycle failed, will retry next interval: {e}")
+                if args.once:
+                    raise
             if args.once:
                 break
             print(f"Sleeping {args.interval_minutes} minute(s)...\n")
