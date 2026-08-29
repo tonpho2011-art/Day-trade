@@ -6,3 +6,4 @@ matplotlib
 python-dotenv
 feedparser
 tabulate
+alpaca-py
