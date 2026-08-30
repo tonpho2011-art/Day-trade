@@ -7,8 +7,7 @@ single threaded yfinance download and score them locally.
 import pandas as pd
 import yfinance as yf
 
-from daytrade import candles
-from daytrade.indicators import build_signal, signal_from_score
+from daytrade.indicators import build_signal
 from daytrade.news import get_headlines, score_sentiment
 from daytrade.screener import top_movers
 
@@ -86,12 +85,13 @@ def batch_intraday_signals(
     sma_fast: int = 6,
     sma_slow: int = 24,
 ) -> list[dict]:
-    """Like batch_signals, but on intraday bars and with candlestick
-    patterns on the latest bar layered onto the score/signal/reasons.
+    """Like batch_signals, but on intraday bars.
 
     Default sma_fast/sma_slow (6/24 bars) on 5-minute bars is roughly a
     30-minute vs 2-hour trend read -- tune via the args if you change
-    `interval`.
+    `interval`. Candlestick patterns are already folded into build_signal's
+    score/signal/reasons; `patterns` is still exposed on the result for
+    callers that want the raw booleans.
     """
     symbols = list(dict.fromkeys(s for s in symbols if s))
     if not symbols:
@@ -111,28 +111,6 @@ def batch_intraday_signals(
                 continue
 
             base = build_signal(df, sma_fast=sma_fast, sma_slow=sma_slow)
-            patterns = candles.detect_patterns(df)
-            bullish = patterns["bullish_engulfing"] or patterns["hammer"]
-            bearish = patterns["bearish_engulfing"] or patterns["shooting_star"]
-
-            score = base["score"]
-            pattern_notes = []
-            if bullish:
-                score += 1
-                name = "bullish engulfing" if patterns["bullish_engulfing"] else "hammer"
-                pattern_notes.append(f"Candlestick: {name} on the latest bar (bullish)")
-            if bearish:
-                score -= 1
-                name = "bearish engulfing" if patterns["bearish_engulfing"] else "shooting star"
-                pattern_notes.append(f"Candlestick: {name} on the latest bar (bearish)")
-            if patterns["doji"] and not bullish and not bearish:
-                pattern_notes.append("Candlestick: doji on the latest bar (indecision)")
-
-            base["score"] = score
-            base["signal"] = signal_from_score(score)
-            base["reasons"] = base["reasons"] + pattern_notes
-            base["patterns"] = patterns
-
             result = {"symbol": symbol, **meta.get(symbol, {}), **base}
         except Exception:
             continue
