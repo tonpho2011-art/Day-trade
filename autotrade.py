@@ -250,8 +250,8 @@ def main():
                         help="Max number of symbols to scan each pass (default: 100)")
     parser.add_argument("--cash-per-trade", type=float, default=500.0,
                         help="Base dollar amount per new position before leverage (default: 500)")
-    parser.add_argument("--leverage", type=float, default=1.0,
-                        help="Multiplies --cash-per-trade using margin buying power (default: 1.0, no leverage)")
+    parser.add_argument("--leverage", type=float, default=5.0,
+                        help="Multiplies --cash-per-trade using margin buying power (default: 5.0)")
     parser.add_argument("--max-positions", type=int, default=8,
                         help="Max concurrent open positions (default: 8)")
     parser.add_argument("--stop-loss-pct", type=float, default=1.5,
