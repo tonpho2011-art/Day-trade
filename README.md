@@ -69,7 +69,7 @@ python autotrade.py --live-paper --once                 # places paper orders, s
 python autotrade.py --interval-minutes 5                # checks/rebalances every 5 minutes
 python autotrade.py --universe-size 100                 # scans a universe of 100 tickers
 python autotrade.py --cash-per-trade 500                # sets $ amount to risk per trade
-python autotrade.py --leverage 3                        # multiplies cash-per-trade 3x using margin (paper only)
+python autotrade.py --leverage 5                        # multiplies cash-per-trade 5x using margin (paper only)
 python autotrade.py --max-positions 8                   # caps number of open positions
 python autotrade.py --stop-loss-pct 1.5                 # exits a position if it drops 1.5%
 python autotrade.py --take-profit-pct 3                 # exits a position after a 3% gain
@@ -77,8 +77,8 @@ python autotrade.py --flatten-minutes-before-close 5    # closes all positions 5
 python autotrade.py --no-new-entries-minutes-before-close 15  # stops opening new trades 15 min before close
 python autotrade.py --ignore-market-hours               # runs even when the market is closed
 python autotrade.py --live-paper --once --ignore-market-hours  # single live-paper pass, ignoring market hours
-python autotrade.py --live-paper --cash-per-trade 500 --leverage 3 --stop-loss-pct 1.5 --take-profit-pct 3  # live-paper with sizing, leverage, and risk exits
-python autotrade.py --live-paper --cash-per-trade 500 --leverage 3 --stop-loss-pct 1.5 --take-profit-pct 3 --max-positions 8 --interval-minutes 5 --universe-size 100  # full live-paper config combining all the above
+python autotrade.py --live-paper --cash-per-trade 500 --leverage 5 --stop-loss-pct 1.5 --take-profit-pct 3  # live-paper with sizing, leverage, and risk exits
+python autotrade.py --live-paper --cash-per-trade 500 --leverage 5 --stop-loss-pct 1.5 --take-profit-pct 3 --max-positions 8 --interval-minutes 5 --universe-size 100  # full live-paper config combining all the above
 ```
 
 `--leverage` multiplies `--cash-per-trade` using Alpaca's margin buying
@@ -108,6 +108,6 @@ the source. Edit `main.py` directly to change the symbol/period/interval.
   point this at a real-money account.
 
 Commands
-python autotrade.py --live-paper --cash-per-trade 500 --leverage 3 --stop-loss-pct 1.5 --take-profit-pct 3 --max-positions 8 --interval-minutes 5 --universe-size 100 (for everything)
+python autotrade.py --live-paper --cash-per-trade 500 --leverage 5 --stop-loss-pct 1.5 --take-profit-pct 3 --max-positions 8 --interval-minutes 5 --universe-size 100 (for everything)
 cd C:\Users\namhe\Downloads\Daytrade (pull from this folder)
  .venv\Scripts\Activate.ps1 (fix modulenotfounderror)
