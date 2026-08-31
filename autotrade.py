@@ -33,7 +33,7 @@ Usage:
   python autotrade.py                        Dry run, loops every 5 min during market hours
   python autotrade.py --live-paper            Actually trade on paper, same loop
   python autotrade.py --live-paper --once     Single pass then exit (for testing)
-  python autotrade.py --cash-per-trade 500 --leverage 3 --stop-loss-pct 1.5 --take-profit-pct 3
+  python autotrade.py --cash-per-trade 500 --leverage 7 --stop-loss-pct 2 --take-profit-pct 4
 
 This is a simple rule-based heuristic on top of free delayed/real-time
 data. It will generate losing trades -- that's normal, not a bug. Do not
@@ -250,14 +250,14 @@ def main():
                         help="Max number of symbols to scan each pass (default: 100)")
     parser.add_argument("--cash-per-trade", type=float, default=500.0,
                         help="Base dollar amount per new position before leverage (default: 500)")
-    parser.add_argument("--leverage", type=float, default=5.0,
-                        help="Multiplies --cash-per-trade using margin buying power (default: 5.0)")
+    parser.add_argument("--leverage", type=float, default=7.0,
+                        help="Multiplies --cash-per-trade using margin buying power (default: 7.0)")
     parser.add_argument("--max-positions", type=int, default=8,
                         help="Max concurrent open positions (default: 8)")
-    parser.add_argument("--stop-loss-pct", type=float, default=1.5,
-                        help="Close a position if it drops this %% below entry (default: 1.5)")
-    parser.add_argument("--take-profit-pct", type=float, default=3.0,
-                        help="Close a position if it rises this %% above entry (default: 3.0)")
+    parser.add_argument("--stop-loss-pct", type=float, default=2.0,
+                        help="Close a position if it drops this %% below entry (default: 2.0)")
+    parser.add_argument("--take-profit-pct", type=float, default=4.0,
+                        help="Close a position if it rises this %% above entry (default: 4.0)")
     parser.add_argument("--flatten-minutes-before-close", type=int, default=5,
                         help="Close every open position once this close to market close (default: 5)")
     parser.add_argument("--no-new-entries-minutes-before-close", type=int, default=15,
