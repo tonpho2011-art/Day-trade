@@ -65,6 +65,7 @@ python bot.py AAPL MSFT NVDA --live-paper --ignore-market-hours  # live-paper, r
 python autotrade.py                                     # dry-run, loops continuously during market hours
 python autotrade.py --once                              # dry-run, single pass then exit
 python autotrade.py --live-paper                        # places real (paper/fake-money) orders, loops
+python autotrade.py --live-paper --cash-per-trade 500    # live-paper with sizing, using default 7x leverage / 2% stop-loss / 4% take-profit
 python autotrade.py --live-paper --once                 # places paper orders, single pass then exit
 python autotrade.py --interval-minutes 5                # checks/rebalances every 5 minutes
 python autotrade.py --universe-size 100                 # scans a universe of 100 tickers
