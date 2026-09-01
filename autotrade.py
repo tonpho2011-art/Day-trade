@@ -2,9 +2,11 @@
 
 Scans a liquid universe (today's gainers/active/losers + the S&P 500) on
 5-minute candles, combining the SMA/RSI/MACD/volume signal engine with
-candlestick patterns (engulfing, hammer, shooting star, doji). Opens
-positions on STRONG BUY, and exits a held position on any of three
-independent triggers, whichever comes first:
+candlestick patterns (engulfing, hammer, shooting star, doji). Opens a long only when at least two of three specialists vote BUY on the
+last closed 5-minute bar (PO3+IFVG, 9/21 EMA + volume, lower-Bollinger
+rejection). STRONG BUY from the old composite score does not open a trade;
+it is only a tie-break. STRONG SELL still exits a held name. Independent
+risk exits still apply first:
   1. Stop-loss  -- price drops --stop-loss-pct from entry
   2. Take-profit -- price rises --take-profit-pct from entry
   3. STRONG SELL signal flips on
@@ -35,7 +37,7 @@ Usage:
   python autotrade.py --live-paper --once     Single pass then exit (for testing)
   python autotrade.py --cash-per-trade 500 --leverage 7 --stop-loss-pct 2 --take-profit-pct 4
 
-This is a simple rule-based heuristic on top of free delayed/real-time
+This is a three-agent heuristic on top of free delayed/real-time
 data. It will generate losing trades -- that's normal, not a bug. Do not
 point this at a real-money account.
 """
@@ -50,6 +52,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
 from daytrade import broker
+from daytrade.committee import evaluate_agents, format_votes, select_buys, vote_count
 from daytrade.scan import batch_intraday_signals
 from daytrade.tradelog import log_trade
 from daytrade.universe import get_daytrade_universe
@@ -67,14 +70,15 @@ class Config:
     flatten_buffer: int
     no_entry_buffer: int
     ignore_market_hours: bool
+    candle_interval: str
 
     @property
     def notional_per_trade(self) -> float:
         return self.cash_per_trade * self.leverage
 
 
-def _log(symbol: str, signal, score, price, action: str, live: bool) -> None:
-    log_trade({
+def _log(symbol: str, signal, score, price, action: str, live: bool, extra: dict | None = None) -> None:
+    row = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "symbol": symbol,
         "signal": signal,
@@ -82,7 +86,19 @@ def _log(symbol: str, signal, score, price, action: str, live: bool) -> None:
         "price": price,
         "action": action,
         "mode": "live-paper" if live else "dry-run",
-    })
+    }
+    if extra:
+        row.update(extra)
+    log_trade(row)
+
+
+def _vote_log(votes: dict) -> dict:
+    return {
+        "vote_count": vote_count(votes),
+        "po3_ifvg": votes.get("po3_ifvg"),
+        "ema_trend": votes.get("ema_trend"),
+        "bb_reversion": votes.get("bb_reversion"),
+    }
 
 
 def flatten_all(client, positions: dict, live: bool) -> None:
@@ -182,36 +198,64 @@ def run_cycle(client, cfg: Config) -> None:
               f"sub-$25k account -- pausing new entries to avoid an order rejection/lockout.")
         allow_new_entries = False
 
-    results = batch_intraday_signals(scan_symbols)
-    open_count = len(positions)
+    results = batch_intraday_signals(scan_symbols, interval=cfg.candle_interval)
+    for r in results:
+        try:
+            r["votes"] = evaluate_agents(r.get("df"), interval=cfg.candle_interval)
+        except Exception:
+            r["votes"] = {"po3_ifvg": "SKIP", "ema_trend": "SKIP", "bb_reversion": "SKIP"}
+        r["vote_count"] = vote_count(r["votes"])
+
+    held = set(positions)
     actionable = 0
 
     for r in results:
         symbol = r["symbol"]
         if symbol in exited:
             continue
-        signal = r["signal"]
-        has_position = symbol in positions
-        action = "NONE"
-
-        if (signal == "STRONG BUY" and not has_position and allow_new_entries
-                and open_count < cfg.max_positions and remaining_bp >= cfg.notional_per_trade):
-            action = "BUY"
-        elif signal == "STRONG SELL" and has_position:
-            action = "SELL"
-
-        if action == "NONE":
+        if r["signal"] != "STRONG SELL" or symbol not in held:
             continue
+
+        action = "SELL"
         actionable += 1
+        votes = r["votes"]
+        print(f"  [{symbol}] price={r['price']:.2f} {format_votes(votes)} "
+              f"signal={r['signal']} (score {r['score']}) -> {action}")
+        if cfg.live:
+            ok, err = broker.safe_close_position(client, symbol)
+            if ok:
+                print(f"    -> submitted paper SELL (close position) for {symbol}")
+                held.discard(symbol)
+            else:
+                print(f"    -> SELL order FAILED: {err}")
+                action = "SELL_FAILED"
+        else:
+            print(f"    -> [dry run] would SELL/close position in {symbol}")
+            held.discard(symbol)
+        _log(symbol, r["signal"], r["score"], r["price"], action, cfg.live, extra=_vote_log(votes))
 
-        print(f"  [{symbol}] price={r['price']:.2f} signal={signal} (score {r['score']}) -> {action}")
-
-        if action == "BUY":
+    remaining_slots_bp = remaining_bp
+    if allow_new_entries:
+        to_buy = select_buys(
+            results,
+            positions=held,
+            max_positions=cfg.max_positions,
+            remaining_bp=remaining_slots_bp,
+            notional=cfg.notional_per_trade,
+        )
+        for r in to_buy:
+            symbol = r["symbol"]
+            if symbol in exited:
+                continue
+            action = "BUY"
+            actionable += 1
+            votes = r["votes"]
+            print(f"  [{symbol}] price={r['price']:.2f} {format_votes(votes)} "
+                  f"({r['vote_count']}/3) score={r['score']} -> {action}")
             if cfg.live:
                 ok, err = broker.safe_buy_notional(client, symbol, cfg.notional_per_trade)
                 if ok:
-                    open_count += 1
-                    remaining_bp -= cfg.notional_per_trade
+                    remaining_slots_bp -= cfg.notional_per_trade
                     print(f"    -> submitted paper BUY order for ${cfg.notional_per_trade:.2f} "
                           f"of {symbol} ({cfg.leverage}x leverage)")
                 else:
@@ -220,22 +264,10 @@ def run_cycle(client, cfg: Config) -> None:
             else:
                 print(f"    -> [dry run] would BUY ${cfg.notional_per_trade:.2f} of {symbol} "
                       f"({cfg.leverage}x leverage)")
-
-        elif action == "SELL":
-            if cfg.live:
-                ok, err = broker.safe_close_position(client, symbol)
-                if ok:
-                    print(f"    -> submitted paper SELL (close position) for {symbol}")
-                else:
-                    print(f"    -> SELL order FAILED: {err}")
-                    action = "SELL_FAILED"
-            else:
-                print(f"    -> [dry run] would SELL/close position in {symbol}")
-
-        _log(symbol, signal, r["score"], r["price"], action, cfg.live)
+            _log(symbol, r["signal"], r["score"], r["price"], action, cfg.live, extra=_vote_log(votes))
 
     if actionable == 0:
-        print("  No actionable signals this pass.")
+        print("  No actionable 2-of-3 entries or STRONG SELL exits this pass.")
 
 
 def main():
@@ -245,7 +277,11 @@ def main():
                              "Without this flag, nothing is ever submitted.")
     parser.add_argument("--once", action="store_true", help="Single pass then exit (default: loop continuously)")
     parser.add_argument("--interval-minutes", type=int, default=5,
-                        help="Minutes between scans (default: 5)")
+                        help="Minutes between scans (default: 5). This is only the sleep; "
+                             "it does not change the Yahoo candle size.")
+    parser.add_argument("--candle-interval", default="5m",
+                        choices=["1m", "2m", "5m", "15m", "30m", "60m", "1h"],
+                        help="Yahoo bar size used for agent votes (default: 5m)")
     parser.add_argument("--universe-size", type=int, default=100,
                         help="Max number of symbols to scan each pass (default: 100)")
     parser.add_argument("--cash-per-trade", type=float, default=500.0,
@@ -275,7 +311,8 @@ def main():
     print(f"Mode: {mode}")
     print(f"Per-trade size: ${args.cash_per_trade:.2f} x {args.leverage}x leverage = "
           f"${args.cash_per_trade * args.leverage:.2f} notional  |  "
-          f"stop-loss {args.stop_loss_pct}%  take-profit {args.take_profit_pct}%\n")
+          f"stop-loss {args.stop_loss_pct}%  take-profit {args.take_profit_pct}%")
+    print(f"Candles: {args.candle_interval}  |  scan every {args.interval_minutes} min\n")
 
     cfg = Config(
         live=args.live_paper,
@@ -288,6 +325,7 @@ def main():
         flatten_buffer=args.flatten_minutes_before_close,
         no_entry_buffer=args.no_new_entries_minutes_before_close,
         ignore_market_hours=args.ignore_market_hours,
+        candle_interval=args.candle_interval,
     )
 
     try:

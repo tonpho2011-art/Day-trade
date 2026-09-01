@@ -111,7 +111,7 @@ def batch_intraday_signals(
                 continue
 
             base = build_signal(df, sma_fast=sma_fast, sma_slow=sma_slow)
-            result = {"symbol": symbol, **meta.get(symbol, {}), **base}
+            result = {"symbol": symbol, **meta.get(symbol, {}), **base, "df": df}
         except Exception:
             continue
         results.append(result)

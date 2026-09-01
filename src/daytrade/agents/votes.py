@@ -1,0 +1,2 @@
+BUY = "BUY"
+SKIP = "SKIP"

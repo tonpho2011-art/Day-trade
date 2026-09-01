@@ -8,3 +8,4 @@ feedparser
 tabulate
 alpaca-py
 ta
+pytest

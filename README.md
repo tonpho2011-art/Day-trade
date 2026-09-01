@@ -86,6 +86,14 @@ python autotrade.py --live-paper --cash-per-trade 500 --leverage 7 --stop-loss-p
 power -- real leverage even on a paper account, amplifying both gains and
 losses by the same multiple.
 
+`autotrade.py` opens a new long only when **at least two of three** agents
+vote BUY on the last **closed** 5-minute bar: (1) PO3 + IFVG, (2) 9/21 EMA
+cross with volume ≥ 1.5×, (3) lower Bollinger poke with hammer or bullish
+engulfing and close back inside. The old composite STRONG BUY score does
+not open trades; STRONG SELL still exits. Size stays `--cash-per-trade ×
+leverage`. Restart the loop after pulling this change -- a running process
+keeps the old STRONG BUY gate.
+
 ### main.py -- hardcoded single backtest
 
 ```powershell

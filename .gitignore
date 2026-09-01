@@ -8,3 +8,4 @@ data/*.parquet
 data/*.html
 *.log
 .ipynb_checkpoints/
+.pytest_cache/
