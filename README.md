@@ -65,33 +65,34 @@ python bot.py AAPL MSFT NVDA --live-paper --ignore-market-hours  # live-paper, r
 python autotrade.py                                     # dry-run, loops continuously during market hours
 python autotrade.py --once                              # dry-run, single pass then exit
 python autotrade.py --live-paper                        # places real (paper/fake-money) orders, loops
-python autotrade.py --live-paper --cash-per-trade 500    # live-paper with sizing, using default 7x leverage / 2% stop-loss / 4% take-profit
+python autotrade.py --live-paper --cash-per-trade 500    # live-paper with sizing, default 7x leverage, ATR/Fibonacci-sized stop-loss/take-profit, and the ML ensemble gate (if trained)
 python autotrade.py --live-paper --once                 # places paper orders, single pass then exit
 python autotrade.py --interval-minutes 5                # checks/rebalances every 5 minutes
 python autotrade.py --universe-size 100                 # scans a universe of 100 tickers
 python autotrade.py --cash-per-trade 500                # sets $ amount to risk per trade
 python autotrade.py --leverage 7                        # multiplies cash-per-trade 7x using margin (paper only)
 python autotrade.py --max-positions 8                   # caps number of open positions
-python autotrade.py --stop-loss-pct 2                   # exits a position if it drops 2%
-python autotrade.py --take-profit-pct 4                 # exits a position after a 4% gain
 python autotrade.py --flatten-minutes-before-close 5    # closes all positions 5 min before market close
 python autotrade.py --no-new-entries-minutes-before-close 15  # stops opening new trades 15 min before close
 python autotrade.py --ignore-market-hours               # runs even when the market is closed
 python autotrade.py --live-paper --once --ignore-market-hours  # single live-paper pass, ignoring market hours
-python autotrade.py --live-paper --cash-per-trade 500 --leverage 7 --stop-loss-pct 2 --take-profit-pct 4  # live-paper with sizing, leverage, and risk exits
-python autotrade.py --live-paper --cash-per-trade 500 --leverage 7 --stop-loss-pct 2 --take-profit-pct 4 --max-positions 8 --interval-minutes 5 --universe-size 100  # full live-paper config combining all the above
+python autotrade.py --live-paper --cash-per-trade 500 --leverage 7 --max-positions 8 --interval-minutes 5 --universe-size 100  # full live-paper config combining all the above, dynamic risk + ML gate on by default
 ```
 
 `--leverage` multiplies `--cash-per-trade` using Alpaca's margin buying
 power -- real leverage even on a paper account, amplifying both gains and
 losses by the same multiple.
 
-`--stop-loss-pct`/`--take-profit-pct` are now only the *fallback* used when a
-symbol has no ATR-based risk plan (see below) or `--fixed-risk` is passed.
+**Stop-loss/take-profit is no longer a flat percentage by default.** Each
+position gets its own ATR-sized stop/target (snapped onto the nearest
+Fibonacci support/resistance) computed at entry -- see `src/daytrade/risk.py`
+and the Notes section below. `--stop-loss-pct`/`--take-profit-pct` still
+exist, but now only take effect when `--fixed-risk` is passed (or as a
+fallback if the dynamic plan couldn't be computed):
 
 ```powershell
-python autotrade.py --fixed-risk                        # use flat stop/take-profit % for every symbol instead of ATR sizing
-python autotrade.py --no-ml                              # skip the ML ensemble cross-check, buy on rule-based signal alone
+python autotrade.py --fixed-risk --stop-loss-pct 2 --take-profit-pct 4  # old behavior: flat 2%/4% for every symbol, no ATR sizing
+python autotrade.py --no-ml                                              # skip the ML ensemble cross-check, buy on rule-based signal alone
 ```
 
 ### train_models.py -- train the ML ensemble
@@ -146,6 +147,6 @@ the source. Edit `main.py` directly to change the symbol/period/interval.
   doesn't carry custom fields.
 
 Commands
-python autotrade.py --live-paper --cash-per-trade 500 --leverage 7 --stop-loss-pct 2 --take-profit-pct 4 --max-positions 8 --interval-minutes 2 --universe-size 100 (for everything)
+python autotrade.py --live-paper --cash-per-trade 500 --leverage 7 --max-positions 8 --interval-minutes 2 --universe-size 100 (for everything -- dynamic ATR/Fibonacci risk sizing + ML ensemble gate on by default now)
 cd C:\Users\namhe\Downloads\Daytrade (pull from this folder)
  .venv\Scripts\Activate.ps1 (fix modulenotfounderror)
