@@ -12,7 +12,7 @@ investment advice.
 import pandas as pd
 import ta
 
-from daytrade import candles
+from daytrade import candles, fibonacci
 
 # Weight per category in the final composite score. Trend/momentum are
 # generally the most reliable timeframe-agnostic reads; volatility
@@ -153,7 +153,7 @@ def _momentum_votes(row) -> tuple[list[int], list[str]]:
         if rsi_last >= 85:
             votes.append(-1)
             reasons.append(f"RSI {rsi_last:.1f} is extremely overbought (>=85), blow-off/pullback risk")
-        elif rsi_last >= 45:
+        elif rsi_last >= 55:
             votes.append(1)
             reasons.append(f"RSI {rsi_last:.1f} shows strong bullish momentum")
         elif rsi_last < 30:
@@ -287,13 +287,11 @@ def _candlestick_score(votes: list[int]) -> float:
     return max(-1.0, min(1.0, sum(fired) / len(fired)))
 
 
-def build_signal(df: pd.DataFrame, sma_fast: int = 10, sma_slow: int = 30) -> dict:
-    """Combine ~60 trend/momentum/volatility/volume/candlestick indicators
-    into a BUY/SELL/HOLD call with reasons.
-
-    This is a rule-based heuristic, not a prediction -- treat it as one
-    input among many, not investment advice.
-    """
+def _compute_frame(df: pd.DataFrame, sma_fast: int, sma_slow: int):
+    """The vectorized indicator pass, done once over the whole df. Split out
+    from build_signal so signal_series() can reuse it across every row
+    instead of paying for ta.add_all_ta_features() per bar (that function
+    is itself vectorized -- rerunning it per row would be O(n^2))."""
     close = df["Close"]
     fast = sma(close, sma_fast)
     slow = sma(close, sma_slow)
@@ -307,16 +305,27 @@ def build_signal(df: pd.DataFrame, sma_fast: int = 10, sma_slow: int = 30) -> di
     ta_df["rsi_custom"] = r
     ta_df["macd_custom"] = macd_line
     ta_df["macd_signal_custom"] = signal_line
+    return ta_df, fast, slow, vol_ratio
 
-    last = ta_df.iloc[-1]
-    prior_row = ta_df.iloc[-2] if len(ta_df) > 1 else None
-    prior_bbw = ta_df["volatility_bbw"].iloc[-2] if len(ta_df) > 1 else None
 
-    trend_votes, trend_reasons = _trend_votes(last, fast.iloc[-1], slow.iloc[-1])
+def _score_at(df: pd.DataFrame, ta_df: pd.DataFrame, fast: pd.Series, slow: pd.Series,
+              vol_ratio: pd.Series, i: int) -> dict:
+    """Same composite-score logic as build_signal, but for row `i` of an
+    already-computed indicator frame instead of always the last row."""
+    sub_df = df.iloc[: i + 1]
+    last = ta_df.iloc[i]
+    prior_row = ta_df.iloc[i - 1] if i > 0 else None
+    prior_bbw = ta_df["volatility_bbw"].iloc[i - 1] if i > 0 else None
+
+    trend_votes, trend_reasons = _trend_votes(last, fast.iloc[i], slow.iloc[i])
+    fib_v, fib_reason = fibonacci.fib_vote(sub_df)
+    trend_votes.append(fib_v)
+    if fib_reason:
+        trend_reasons.append(fib_reason)
     momentum_votes, momentum_reasons = _momentum_votes(last)
     volatility_votes, volatility_reasons = _volatility_votes(last, prior_bbw)
-    volume_votes, volume_reasons = _volume_votes(last, prior_row, vol_ratio.iloc[-1])
-    candle_votes, candle_reasons, patterns = _candlestick_votes(df)
+    volume_votes, volume_reasons = _volume_votes(last, prior_row, vol_ratio.iloc[i])
+    candle_votes, candle_reasons, patterns = _candlestick_votes(sub_df)
 
     category_scores = {
         "trend": _category_score(trend_votes),
@@ -341,9 +350,35 @@ def build_signal(df: pd.DataFrame, sma_fast: int = 10, sma_slow: int = 30) -> di
         "category_scores": category_scores,
         "indicator_count": total_indicators,
         "patterns": patterns,
-        "price": close.iloc[-1],
-        "rsi": r.iloc[-1],
-        "sma_fast": fast.iloc[-1],
-        "sma_slow": slow.iloc[-1],
-        "volume_ratio": vol_ratio.iloc[-1],
+        "price": df["Close"].iloc[i],
+        "rsi": last.get("rsi_custom"),
+        "sma_fast": fast.iloc[i],
+        "sma_slow": slow.iloc[i],
+        "volume_ratio": vol_ratio.iloc[i],
+        "atr": _safe(last, "volatility_atr"),
     }
+
+
+def build_signal(df: pd.DataFrame, sma_fast: int = 10, sma_slow: int = 30) -> dict:
+    """Combine ~60 trend/momentum/volatility/volume/candlestick indicators
+    into a BUY/SELL/HOLD call with reasons.
+
+    This is a rule-based heuristic, not a prediction -- treat it as one
+    input among many, not investment advice.
+    """
+    ta_df, fast, slow, vol_ratio = _compute_frame(df, sma_fast, sma_slow)
+    return _score_at(df, ta_df, fast, slow, vol_ratio, len(df) - 1)
+
+
+def signal_series(df: pd.DataFrame, sma_fast: int = 10, sma_slow: int = 30, start: int | None = None):
+    """Yield (i, signal_dict) for every bar from `start` onward, reusing one
+    vectorized indicator pass across the whole df. This is what
+    ml_model.build_training_set uses to generate features/labels across
+    history -- calling build_signal() in a per-bar loop instead would
+    recompute the full indicator set from scratch on every bar."""
+    ta_df, fast, slow, vol_ratio = _compute_frame(df, sma_fast, sma_slow)
+    n = len(df)
+    if start is None:
+        start = max(sma_slow + 5, 40)
+    for i in range(start, n):
+        yield i, _score_at(df, ta_df, fast, slow, vol_ratio, i)

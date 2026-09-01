@@ -86,6 +86,36 @@ python autotrade.py --live-paper --cash-per-trade 500 --leverage 7 --stop-loss-p
 power -- real leverage even on a paper account, amplifying both gains and
 losses by the same multiple.
 
+`--stop-loss-pct`/`--take-profit-pct` are now only the *fallback* used when a
+symbol has no ATR-based risk plan (see below) or `--fixed-risk` is passed.
+
+```powershell
+python autotrade.py --fixed-risk                        # use flat stop/take-profit % for every symbol instead of ATR sizing
+python autotrade.py --no-ml                              # skip the ML ensemble cross-check, buy on rule-based signal alone
+```
+
+### train_models.py -- train the ML ensemble
+
+```powershell
+python train_models.py                                          # default: ~40 S&P 500 symbols, 60 days of 5m bars
+python train_models.py --symbols AAPL,MSFT,NVDA,TSLA             # train on specific tickers
+python train_models.py --symbol-count 60                         # widen the default universe
+python train_models.py --period 30d --interval 15m                # different history window/bar size
+```
+
+Trains three models (logistic regression, random forest, gradient boosting)
+on the same indicator feature set the rule-based engine votes on, labeled by
+whether an ATR-based take-profit would have been hit before the matching
+stop-loss ("triple barrier" labeling). Saves to `data/models/`.
+
+`autotrade.py` picks up a trained ensemble automatically on startup and, by
+default, only opens a new position when **both** the rule-based signal says
+STRONG BUY **and** a majority of the three models agree the trade has better
+than 50/50 odds. If no trained model exists, it prints a notice and trades on
+the rule-based signal alone -- run `train_models.py` first to enable the
+cross-check. Retrain periodically; a model trained on last month's data
+drifts as market conditions change.
+
 ### main.py -- hardcoded single backtest
 
 ```powershell
@@ -104,11 +134,18 @@ the source. Edit `main.py` directly to change the symbol/period/interval.
   paper/fake-money endpoint); without it, everything is dry-run/print-only.
 - Trade/decision history for `bot.py` and `autotrade.py` is appended to
   `data/trade_log.csv`.
-- This is a simple rule-based heuristic on top of free delayed/real-time
-  data. It will generate losing trades -- that's normal, not a bug. Do not
-  point this at a real-money account.
+- This is a simple rule-based heuristic (now with an ML cross-check and
+  ATR/Fibonacci-based risk sizing on top) using free delayed/real-time data.
+  It will generate losing trades -- that's normal, not a bug. Do not point
+  this at a real-money account.
+- Stop-loss/take-profit is now ATR-sized per symbol by default (see
+  `src/daytrade/risk.py`), snapped onto the nearest Fibonacci support/
+  resistance level when that's tighter, with a floor so a snap never leaves
+  less than a 1.5:1 reward:risk ratio. Each open position's plan is stored in
+  `data/positions_meta.json` (gitignored) since Alpaca's position object
+  doesn't carry custom fields.
 
 Commands
-python autotrade.py --live-paper --cash-per-trade 500 --leverage 7 --stop-loss-pct 2 --take-profit-pct 4 --max-positions 8 --interval-minutes 5 --universe-size 100 (for everything)
+python autotrade.py --live-paper --cash-per-trade 500 --leverage 7 --stop-loss-pct 2 --take-profit-pct 4 --max-positions 8 --interval-minutes 2 --universe-size 100 (for everything)
 cd C:\Users\namhe\Downloads\Daytrade (pull from this folder)
  .venv\Scripts\Activate.ps1 (fix modulenotfounderror)

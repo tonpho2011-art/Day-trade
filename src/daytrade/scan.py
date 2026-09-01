@@ -9,6 +9,7 @@ import yfinance as yf
 
 from daytrade.indicators import build_signal
 from daytrade.news import get_headlines, score_sentiment
+from daytrade.risk import compute_stops
 from daytrade.screener import top_movers
 
 MIN_BARS = 40
@@ -112,6 +113,15 @@ def batch_intraday_signals(
 
             base = build_signal(df, sma_fast=sma_fast, sma_slow=sma_slow)
             result = {"symbol": symbol, **meta.get(symbol, {}), **base}
+            try:
+                plan = compute_stops(df, base["price"])
+                result["stop_plan"] = {
+                    "stop_pct": plan.stop_pct, "take_pct": plan.take_pct,
+                    "stop_price": plan.stop_price, "take_price": plan.take_price,
+                    "atr_value": plan.atr_value, "reason": plan.reason,
+                }
+            except Exception:
+                result["stop_plan"] = None
         except Exception:
             continue
         results.append(result)

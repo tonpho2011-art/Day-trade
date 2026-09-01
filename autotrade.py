@@ -2,11 +2,16 @@
 
 Scans a liquid universe (today's gainers/active/losers + the S&P 500) on
 5-minute candles, combining the SMA/RSI/MACD/volume signal engine with
-candlestick patterns (engulfing, hammer, shooting star, doji). Opens
-positions on STRONG BUY, and exits a held position on any of three
+candlestick patterns (engulfing, hammer, shooting star, doji) and Fibonacci
+retracement/extension levels. A rule-based STRONG BUY only opens a position
+if an ML ensemble (see ml_model.py / train_models.py) also agrees the setup
+has better than even odds -- when no trained model exists, it falls back to
+the rule-based signal alone. Exits a held position on any of three
 independent triggers, whichever comes first:
-  1. Stop-loss  -- price drops --stop-loss-pct from entry
-  2. Take-profit -- price rises --take-profit-pct from entry
+  1. Stop-loss  -- price drops below an ATR-sized, Fibonacci-snapped level
+     computed at entry (src/daytrade/risk.py), or --stop-loss-pct with
+     --fixed-risk
+  2. Take-profit -- same, on the upside, or --take-profit-pct with --fixed-risk
   3. STRONG SELL signal flips on
 Every open position is also force-flattened before market close so
 nothing is held overnight -- that's what makes this day-trading rather
@@ -49,7 +54,8 @@ sys.path.insert(0, "src")
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8")
 
-from daytrade import broker
+from daytrade import broker, ml_model, position_store
+from daytrade.features import build_features
 from daytrade.scan import batch_intraday_signals
 from daytrade.tradelog import log_trade
 from daytrade.universe import get_daytrade_universe
@@ -67,6 +73,8 @@ class Config:
     flatten_buffer: int
     no_entry_buffer: int
     ignore_market_hours: bool
+    use_dynamic_risk: bool
+    use_ml: bool
 
     @property
     def notional_per_trade(self) -> float:
@@ -99,23 +107,35 @@ def flatten_all(client, positions: dict, live: bool) -> None:
     for symbol, pos in positions.items():
         _log(symbol, "flatten (end of day)", "", pos["current_price"],
              "FLATTEN" if live else "FLATTEN_DRY_RUN", live)
+        position_store.clear(symbol)
 
 
 def check_risk_exits(client, positions: dict, cfg: Config) -> set:
     """Stop-loss / take-profit checks on every currently held position,
     independent of the scanned universe. Returns the set of symbols
-    exited so the main loop doesn't double-process them."""
+    exited so the main loop doesn't double-process them.
+
+    Each symbol's stop/take-profit comes from the ATR-based plan stored at
+    entry time (position_store), falling back to the flat --stop-loss-pct
+    / --take-profit-pct only when --fixed-risk is set or no stored plan
+    exists (e.g. a position opened before this feature, or the store was
+    cleared)."""
     exited = set()
     for symbol, pos in positions.items():
         plpc = pos["unrealized_plpc"] * 100  # decimal -> percent
-        if plpc <= -cfg.stop_loss_pct:
+        plan = position_store.get_plan(symbol) if cfg.use_dynamic_risk else None
+        stop_pct = plan["stop_pct"] if plan else cfg.stop_loss_pct
+        take_pct = plan["take_pct"] if plan else cfg.take_profit_pct
+
+        if plpc <= -stop_pct:
             reason, action = "stop-loss", "SELL_STOPLOSS"
-        elif plpc >= cfg.take_profit_pct:
+        elif plpc >= take_pct:
             reason, action = "take-profit", "SELL_TAKEPROFIT"
         else:
             continue
 
-        print(f"  [{symbol}] unrealized {plpc:+.2f}% hit {reason} -> SELL")
+        print(f"  [{symbol}] unrealized {plpc:+.2f}% hit {reason} "
+              f"(stop -{stop_pct:.2f}% / target +{take_pct:.2f}%{'  [ATR-sized]' if plan else ''}) -> SELL")
         if cfg.live:
             ok, err = broker.safe_close_position(client, symbol)
             if ok:
@@ -127,11 +147,12 @@ def check_risk_exits(client, positions: dict, cfg: Config) -> set:
             print(f"    -> [dry run] would SELL/close position in {symbol} ({reason})")
 
         _log(symbol, f"{reason} ({plpc:+.2f}%)", "", pos["current_price"], action, cfg.live)
+        position_store.clear(symbol)
         exited.add(symbol)
     return exited
 
 
-def run_cycle(client, cfg: Config) -> None:
+def run_cycle(client, cfg: Config, ensemble: dict | None) -> None:
     mtc = broker.minutes_to_close(client)
     if mtc is None:
         if not cfg.ignore_market_hours:
@@ -142,6 +163,7 @@ def run_cycle(client, cfg: Config) -> None:
         mtc = 999  # treat as "plenty of time", skip flatten/no-entry window logic
 
     positions = broker.get_open_positions(client)
+    position_store.sync(set(positions.keys()))
 
     if mtc <= cfg.flatten_buffer:
         if positions:
@@ -194,9 +216,20 @@ def run_cycle(client, cfg: Config) -> None:
         has_position = symbol in positions
         action = "NONE"
 
+        ml_result = None
         if (signal == "STRONG BUY" and not has_position and allow_new_entries
                 and open_count < cfg.max_positions and remaining_bp >= cfg.notional_per_trade):
-            action = "BUY"
+            if cfg.use_ml and ensemble is not None:
+                feats = build_features(r)
+                ml_result = ml_model.predict_ensemble(ensemble, feats)
+                if ml_result["agree"]:
+                    action = "BUY"
+                else:
+                    print(f"  [{symbol}] STRONG BUY (score {r['score']}) but ML ensemble disagrees "
+                          f"({ml_result['votes_for']}/{ml_result['n_models']} models favor it, "
+                          f"avg p={ml_result['avg_probability']:.2f}) -- skipping")
+            else:
+                action = "BUY"
         elif signal == "STRONG SELL" and has_position:
             action = "SELL"
 
@@ -204,9 +237,11 @@ def run_cycle(client, cfg: Config) -> None:
             continue
         actionable += 1
 
-        print(f"  [{symbol}] price={r['price']:.2f} signal={signal} (score {r['score']}) -> {action}")
+        ml_suffix = f"  [ML: {ml_result['votes_for']}/{ml_result['n_models']} agree, p={ml_result['avg_probability']:.2f}]" if ml_result else ""
+        print(f"  [{symbol}] price={r['price']:.2f} signal={signal} (score {r['score']}) -> {action}{ml_suffix}")
 
         if action == "BUY":
+            plan = r.get("stop_plan")
             if cfg.live:
                 ok, err = broker.safe_buy_notional(client, symbol, cfg.notional_per_trade)
                 if ok:
@@ -214,12 +249,18 @@ def run_cycle(client, cfg: Config) -> None:
                     remaining_bp -= cfg.notional_per_trade
                     print(f"    -> submitted paper BUY order for ${cfg.notional_per_trade:.2f} "
                           f"of {symbol} ({cfg.leverage}x leverage)")
+                    if cfg.use_dynamic_risk and plan:
+                        position_store.set_plan(symbol, {"stop_pct": plan["stop_pct"], "take_pct": plan["take_pct"]})
+                        print(f"    -> risk plan: stop -{plan['stop_pct']:.2f}% / target +{plan['take_pct']:.2f}% ({plan['reason']})")
                 else:
                     print(f"    -> BUY order FAILED: {err}")
                     action = "BUY_FAILED"
             else:
                 print(f"    -> [dry run] would BUY ${cfg.notional_per_trade:.2f} of {symbol} "
                       f"({cfg.leverage}x leverage)")
+                if cfg.use_dynamic_risk and plan:
+                    position_store.set_plan(symbol, {"stop_pct": plan["stop_pct"], "take_pct": plan["take_pct"]})
+                    print(f"    -> [dry run] risk plan: stop -{plan['stop_pct']:.2f}% / target +{plan['take_pct']:.2f}% ({plan['reason']})")
 
         elif action == "SELL":
             if cfg.live:
@@ -231,6 +272,7 @@ def run_cycle(client, cfg: Config) -> None:
                     action = "SELL_FAILED"
             else:
                 print(f"    -> [dry run] would SELL/close position in {symbol}")
+            position_store.clear(symbol)
 
         _log(symbol, signal, r["score"], r["price"], action, cfg.live)
 
@@ -265,6 +307,14 @@ def main():
     parser.add_argument("--ignore-market-hours", action="store_true",
                         help="Scan/decide even when the market is closed, for testing the logic "
                              "(orders won't fill until the next session)")
+    parser.add_argument("--fixed-risk", action="store_true",
+                        help="Use the flat --stop-loss-pct/--take-profit-pct for every symbol instead "
+                             "of the default ATR-sized-per-symbol stop/target (see risk.py)")
+    parser.add_argument("--no-ml", action="store_true",
+                        help="Skip the ML ensemble cross-check and buy on the rule-based STRONG BUY "
+                             "signal alone (default: require majority agreement from data/models/, "
+                             "see train_models.py -- if no trained model is found, this is the "
+                             "behavior regardless of this flag)")
     args = parser.parse_args()
 
     client = broker.get_client()
@@ -273,9 +323,20 @@ def main():
     print(f"Connected to Alpaca PAPER account -- cash: ${acct['cash']:.2f}  "
           f"equity: ${acct['equity']:.2f}  buying power: ${acct['buying_power']:.2f}")
     print(f"Mode: {mode}")
+    risk_desc = "flat %" if args.fixed_risk else "ATR-sized per symbol (+ Fibonacci snap), falling back to flat %"
     print(f"Per-trade size: ${args.cash_per_trade:.2f} x {args.leverage}x leverage = "
           f"${args.cash_per_trade * args.leverage:.2f} notional  |  "
-          f"stop-loss {args.stop_loss_pct}%  take-profit {args.take_profit_pct}%\n")
+          f"risk sizing: {risk_desc}  (fallback stop {args.stop_loss_pct}% / target {args.take_profit_pct}%)")
+
+    ensemble = None if args.no_ml else ml_model.load_ensemble()
+    if args.no_ml:
+        print("ML cross-check: disabled (--no-ml)\n")
+    elif ensemble is None:
+        print("ML cross-check: no trained model found in data/models/ -- buying on rule-based "
+              "signal alone. Run `python train_models.py` to enable the ensemble gate.\n")
+    else:
+        print(f"ML cross-check: enabled -- {len(ensemble['models'])} models loaded "
+              f"(trained {ensemble['metadata'].get('trained_at', '?')})\n")
 
     cfg = Config(
         live=args.live_paper,
@@ -288,12 +349,14 @@ def main():
         flatten_buffer=args.flatten_minutes_before_close,
         no_entry_buffer=args.no_new_entries_minutes_before_close,
         ignore_market_hours=args.ignore_market_hours,
+        use_dynamic_risk=not args.fixed_risk,
+        use_ml=not args.no_ml,
     )
 
     try:
         while True:
             try:
-                run_cycle(client, cfg)
+                run_cycle(client, cfg, ensemble)
             except Exception as e:
                 # A network blip or a bad API response must not silently
                 # kill the loop -- that would stop monitoring any open

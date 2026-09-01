@@ -8,3 +8,5 @@ feedparser
 tabulate
 alpaca-py
 ta
+scikit-learn
+joblib

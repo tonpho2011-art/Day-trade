@@ -6,5 +6,7 @@ venv/
 data/*.csv
 data/*.parquet
 data/*.html
+data/*.json
+data/models/
 *.log
 .ipynb_checkpoints/
