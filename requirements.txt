@@ -9,3 +9,4 @@ tabulate
 alpaca-py
 ta
 pytest
+pyarrow

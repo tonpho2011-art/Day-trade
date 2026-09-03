@@ -6,6 +6,9 @@ venv/
 data/*.csv
 data/*.parquet
 data/*.html
+data/*.json
+data/bars_5m_iex/
+data/bars_2m_iex/
 *.log
 .ipynb_checkpoints/
 .pytest_cache/

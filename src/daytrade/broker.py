@@ -66,6 +66,26 @@ def buy_notional(client: TradingClient, symbol: str, dollars: float):
     return client.submit_order(order)
 
 
+def buy_qty(client: TradingClient, symbol: str, qty: float):
+    order = MarketOrderRequest(
+        symbol=symbol,
+        qty=abs(qty),
+        side=OrderSide.BUY,
+        time_in_force=TimeInForce.DAY,
+    )
+    return client.submit_order(order)
+
+
+def sell_qty(client: TradingClient, symbol: str, qty: float):
+    order = MarketOrderRequest(
+        symbol=symbol,
+        qty=abs(qty),
+        side=OrderSide.SELL,
+        time_in_force=TimeInForce.DAY,
+    )
+    return client.submit_order(order)
+
+
 def close_position(client: TradingClient, symbol: str):
     return client.close_position(symbol)
 
@@ -79,6 +99,22 @@ def safe_buy_notional(client: TradingClient, symbol: str, dollars: float) -> tup
     propagate. Returns (ok, error_message)."""
     try:
         buy_notional(client, symbol, dollars)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def safe_buy_qty(client: TradingClient, symbol: str, qty: float) -> tuple[bool, str | None]:
+    try:
+        buy_qty(client, symbol, qty)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def safe_sell_qty(client: TradingClient, symbol: str, qty: float) -> tuple[bool, str | None]:
+    try:
+        sell_qty(client, symbol, qty)
         return True, None
     except Exception as e:
         return False, str(e)
