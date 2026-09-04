@@ -96,6 +96,72 @@ def _write_chunk(
     return saved
 
 
+def frames_from_chunk(raw: pd.DataFrame, yahoo_symbols: list[str]) -> dict[str, pd.DataFrame]:
+    """Split an Alpaca bars response into Yahoo-symbol OHLCV frames."""
+    out: dict[str, pd.DataFrame] = {}
+    if raw is None or raw.empty:
+        return out
+    present = set()
+    if isinstance(raw.index, pd.MultiIndex):
+        present = set(raw.index.get_level_values(0).unique())
+    for yahoo in yahoo_symbols:
+        alpaca = yahoo_to_alpaca(yahoo)
+        try:
+            if isinstance(raw.index, pd.MultiIndex):
+                if alpaca not in present:
+                    continue
+                piece = raw.xs(alpaca)
+            else:
+                piece = raw
+            ohlcv = _ohlcv(piece)
+            if ohlcv.empty:
+                continue
+            out[yahoo] = ohlcv
+        except Exception:
+            continue
+    return out
+
+
+def fetch_recent_bars(
+    symbols: list[str],
+    *,
+    minutes: int = 5,
+    days: int = 5,
+    chunk_size: int = 25,
+    workers: int = 4,
+) -> dict[str, pd.DataFrame]:
+    """Live IEX bars (same feed as the Fib backtest). Does not use Yahoo."""
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=days)
+    frames: dict[str, pd.DataFrame] = {}
+    chunks = [symbols[i : i + chunk_size] for i in range(0, len(symbols), chunk_size)]
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        futs = {
+            pool.submit(
+                _fetch_chunk,
+                [yahoo_to_alpaca(s) for s in chunk],
+                start,
+                end,
+                minutes,
+            ): chunk
+            for chunk in chunks
+        }
+        for fut in as_completed(futs):
+            chunk = futs[fut]
+            try:
+                raw = fut.result()
+            except Exception:
+                for symbol in chunk:
+                    try:
+                        piece = _fetch_chunk([yahoo_to_alpaca(symbol)], start, end, minutes)
+                        frames.update(frames_from_chunk(piece, [symbol]))
+                    except Exception:
+                        continue
+                continue
+            frames.update(frames_from_chunk(raw, chunk))
+    return frames
+
+
 def download_intraday(
     symbols: list[str],
     *,

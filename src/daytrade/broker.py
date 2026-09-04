@@ -7,8 +7,14 @@ code path to a live-money account.
 import os
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce
-from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
+from alpaca.trading.requests import (
+    GetOrdersRequest,
+    LimitOrderRequest,
+    MarketOrderRequest,
+    StopLossRequest,
+    TakeProfitRequest,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -92,6 +98,58 @@ def close_position(client: TradingClient, symbol: str):
 
 def close_all_positions(client: TradingClient):
     return client.close_all_positions(cancel_orders=True)
+
+
+def alpaca_symbol(yahoo: str) -> str:
+    return yahoo.replace("-", ".")
+
+
+def submit_bracket_limit(
+    client: TradingClient,
+    symbol: str,
+    side: str,
+    qty: float,
+    limit_price: float,
+    stop_price: float,
+    target_price: float,
+):
+    """DAY limit with attached stop and take-profit (paper)."""
+    order = LimitOrderRequest(
+        symbol=alpaca_symbol(symbol),
+        qty=abs(qty),
+        side=OrderSide.BUY if side == "LONG" else OrderSide.SELL,
+        time_in_force=TimeInForce.DAY,
+        limit_price=round(float(limit_price), 2),
+        order_class=OrderClass.BRACKET,
+        take_profit=TakeProfitRequest(limit_price=round(float(target_price), 2)),
+        stop_loss=StopLossRequest(stop_price=round(float(stop_price), 2)),
+    )
+    return client.submit_order(order)
+
+
+def safe_bracket_limit(
+    client: TradingClient,
+    symbol: str,
+    side: str,
+    qty: float,
+    limit_price: float,
+    stop_price: float,
+    target_price: float,
+) -> tuple[bool, str | None]:
+    try:
+        submit_bracket_limit(client, symbol, side, qty, limit_price, stop_price, target_price)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def get_open_order_symbols(client: TradingClient) -> set[str]:
+    req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+    return {o.symbol for o in client.get_orders(req)}
+
+
+def cancel_open_orders(client: TradingClient) -> None:
+    client.cancel_orders()
 
 
 def safe_buy_notional(client: TradingClient, symbol: str, dollars: float) -> tuple[bool, str | None]:
