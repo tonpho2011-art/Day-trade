@@ -33,12 +33,53 @@ class FibConfig:
     ema_slow: int = 200
     notional: float = NOTIONAL
     fill_at_limit: bool = False
-    htf_minutes: int = 30
+    htf_minutes: int = 0
 
 
 def fib_price(start: float, end: float, level: float) -> float:
     """START=100%, END=0%. 25% is nearest END; 70% is nearest START."""
     return end + (start - end) * level
+
+
+def htf_color_series(df: pd.DataFrame, minutes: int = 30) -> np.ndarray:
+    """Last finished HTF color at each 5m bar: 1 green, -1 red, 0 none/doji."""
+    n = 0 if df is None else len(df)
+    out = np.zeros(n, dtype=np.int8)
+    if not minutes or df is None or df.empty:
+        return out
+    bars = df.copy()
+    bars.index = _to_ny(pd.DatetimeIndex(bars.index))
+    resampled = bars.resample(f"{minutes}min", closed="left", label="left").agg(
+        {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    ).dropna(how="any")
+    if resampled.empty:
+        return out
+    expected = max(1, minutes // 5)
+    starts = []
+    colors = []
+    for ts in resampled.index:
+        end = ts + pd.Timedelta(minutes=minutes)
+        piece = bars.loc[(bars.index >= ts) & (bars.index < end)]
+        if len(piece) < expected:
+            continue
+        o, c = float(resampled.loc[ts, "Open"]), float(resampled.loc[ts, "Close"])
+        if c > o:
+            col = 1
+        elif c < o:
+            col = -1
+        else:
+            col = 0
+        starts.append(ts)
+        colors.append(col)
+    if not starts:
+        return out
+    start_idx = pd.DatetimeIndex(starts)
+    floors = bars.index.floor(f"{minutes}min")
+    pos = np.asarray(start_idx.searchsorted(floors, side="left"), dtype=np.int64) - 1
+    cols = np.asarray(colors, dtype=np.int8)
+    valid = pos >= 0
+    out[valid] = cols[pos[valid]]
+    return out
 
 
 def last_closed_htf_color(df: pd.DataFrame, asof, minutes: int = 30) -> int | None:
@@ -220,6 +261,7 @@ def _walk(bars: pd.DataFrame, cfg: FibConfig, symbol: str = ""):
     pending = None
     pos = None
     n = len(bars)
+    htf_cols = htf_color_series(bars, cfg.htf_minutes) if cfg.htf_minutes else None
     for i in range(n):
         ts = index[i]
         o, h, low, c = opens[i], highs[i], lows[i], closes[i]
@@ -305,13 +347,16 @@ def _walk(bars: pd.DataFrame, cfg: FibConfig, symbol: str = ""):
             continue
         if pos is not None or mtc <= NO_ENTRY:
             continue
-        ended = _complete_on_arr(opens, highs, lows, closes, colors, i, cfg, bars)
+        ended = _complete_on_arr(opens, highs, lows, closes, colors, i, cfg, bars, htf_cols)
         if ended:
             pending = ended
     return trades, pending, pos
 
 
-def _complete_on_arr(opens, highs, lows, closes, colors, i: int, cfg: FibConfig, bars: pd.DataFrame):
+def _complete_on_arr(
+    opens, highs, lows, closes, colors, i: int, cfg: FibConfig, bars: pd.DataFrame,
+    htf_cols=None,
+):
     if i < 5:
         return None
     run_color = int(colors[i - 1])
@@ -347,10 +392,8 @@ def _complete_on_arr(opens, highs, lows, closes, colors, i: int, cfg: FibConfig,
         return None
     if side == SHORT and not (end < entry < start):
         return None
-    if cfg.htf_minutes:
-        color = last_closed_htf_color(bars.iloc[: i + 1], bars.index[i], cfg.htf_minutes)
-        if not htf_allows(side, color):
-            return None
+    if htf_cols is not None and not htf_allows(side, int(htf_cols[i])):
+        return None
     return {
         "side": side,
         "entry": entry,

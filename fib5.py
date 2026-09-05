@@ -440,7 +440,7 @@ def main() -> None:
     p.add_argument("--fill-at-limit", action="store_true")
     p.add_argument("--notional", type=float, default=3500.0)
     p.add_argument("--max-positions", type=int, default=None)
-    p.add_argument("--htf-minutes", type=int, default=30)
+    p.add_argument("--htf-minutes", type=int, default=0)
     p.add_argument("--no-htf", action="store_true",
                    help="Disable the closed higher-timeframe color filter")
     p.add_argument("--out", default="data/fib5_backtest.json")

@@ -38,6 +38,12 @@ def _bullish_setup():
     ]
 
 
+def test_fib_default_has_no_htf_filter():
+    cfg = FibConfig()
+    assert cfg.level == 0.618
+    assert cfg.htf_minutes == 0
+
+
 def test_fib_50_is_midpoint():
     assert fib_price(start=99.0, end=105.0, level=0.5) == 102.0
     assert fib_price(start=120.0, end=110.0, level=0.5) == 115.0
@@ -297,6 +303,21 @@ def test_entry_parent_ignores_bracket_legs():
 
     assert is_entry_parent(_O(None)) is True
     assert is_entry_parent(_O("parent-1")) is False
+
+
+def test_htf_color_series_matches_per_bar_lookup():
+    from daytrade.fib5 import last_closed_htf_color, htf_color_series
+
+    rows = [_ohlc(100 + i * 0.1, 101, 99, 100.2 + (i % 3) * 0.3) for i in range(24)]
+    df = _frame(rows)
+    series = htf_color_series(df, 30)
+    for i, ts in enumerate(df.index):
+        slow = last_closed_htf_color(df.iloc[: i + 1], ts, 30)
+        fast = int(series[i])
+        if slow is None or slow == 0:
+            assert fast == 0
+        else:
+            assert fast == slow
 
 
 def test_last_closed_htf_uses_finished_30m_only():

@@ -19,4 +19,4 @@ A setup is valid only if the last **finished** 30-minute RTH candle is
 the same color as the 5-candle impulse (green impulse → green 30m for
 longs; red for shorts). The forming 30m bar is ignored.
 
-`FibConfig.htf_minutes` default `30`. Set `0` to disable.
+`FibConfig.htf_minutes` default `0` (off). Pass `--htf-minutes 30` to enable.
