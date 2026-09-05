@@ -33,11 +33,86 @@ class FibConfig:
     ema_slow: int = 200
     notional: float = NOTIONAL
     fill_at_limit: bool = False
+    htf_minutes: int = 30
 
 
 def fib_price(start: float, end: float, level: float) -> float:
     """START=100%, END=0%. 25% is nearest END; 70% is nearest START."""
     return end + (start - end) * level
+
+
+def last_closed_htf_color(df: pd.DataFrame, asof, minutes: int = 30) -> int | None:
+    """1=green, -1=red, 0=doji, None if no finished HTF bar yet."""
+    if not minutes or df is None or df.empty:
+        return None
+    bars = df.copy()
+    bars.index = _to_ny(pd.DatetimeIndex(bars.index))
+    asof = pd.Timestamp(asof)
+    if asof.tzinfo is None:
+        asof = asof.tz_localize(NY)
+    else:
+        asof = asof.tz_convert(NY)
+    window_start = asof.floor(f"{minutes}min")
+    prior = bars.loc[bars.index < window_start]
+    if prior.empty:
+        return None
+    htf = prior.resample(f"{minutes}min", closed="left", label="left").agg(
+        {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+    ).dropna(how="any")
+    if htf.empty:
+        return None
+    expected = max(1, minutes // 5)
+    keep = []
+    for ts in htf.index:
+        end = ts + pd.Timedelta(minutes=minutes)
+        piece = prior.loc[(prior.index >= ts) & (prior.index < end)]
+        if len(piece) >= expected:
+            keep.append(ts)
+    if not keep:
+        return None
+    last = htf.loc[keep[-1]]
+    o, c = float(last["Open"]), float(last["Close"])
+    if c > o:
+        return 1
+    if c < o:
+        return -1
+    return 0
+
+
+def htf_allows(side: str, color: int | None) -> bool:
+    if color is None or color == 0:
+        return False
+    if side == LONG:
+        return color == 1
+    return color == -1
+
+
+def plan_live_tickets(
+    *,
+    held: set[str],
+    setups: list[dict],
+    pending: list[dict],
+    cap: int = 16,
+) -> dict:
+    """Keep at most (cap - fills) resting entry limits, ranked like the overlay."""
+    held = set(held)
+    room = max(0, cap - len(held))
+    pending_by_sym = {p["symbol"]: p for p in pending if p["symbol"] not in held}
+    fresh = [s for s in setups if s["symbol"] not in held]
+    ranked = sorted(
+        fresh,
+        key=lambda t: (
+            -actual_rr(t),
+            -abs(float(t["stop"]) - float(t["target"])),
+            t["symbol"],
+        ),
+    )
+    chosen = ranked[:room]
+    chosen_syms = {t["symbol"] for t in chosen}
+    keep = [pending_by_sym[t["symbol"]] for t in chosen if t["symbol"] in pending_by_sym]
+    place = [t for t in chosen if t["symbol"] not in pending_by_sym]
+    cancel = [p for sym, p in pending_by_sym.items() if sym not in chosen_syms]
+    return {"room": room, "place": place, "keep": keep, "cancel": cancel}
 
 
 def _to_ny(index: pd.DatetimeIndex) -> pd.DatetimeIndex:
@@ -272,6 +347,10 @@ def _complete_on_arr(opens, highs, lows, closes, colors, i: int, cfg: FibConfig,
         return None
     if side == SHORT and not (end < entry < start):
         return None
+    if cfg.htf_minutes:
+        color = last_closed_htf_color(bars.iloc[: i + 1], bars.index[i], cfg.htf_minutes)
+        if not htf_allows(side, color):
+            return None
     return {
         "side": side,
         "entry": entry,

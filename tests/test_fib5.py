@@ -227,3 +227,124 @@ def test_current_setup_is_pending_after_trend_ends():
     assert setup["entry"] == 102.0
     assert setup["stop"] == 99.0
     assert setup["target"] == 105.0
+
+
+def _ticket(symbol, entry, stop, target, side="LONG", order_id=None):
+    row = {
+        "symbol": symbol,
+        "side": side,
+        "entry_price": entry,
+        "stop": stop,
+        "target": target,
+    }
+    if order_id is not None:
+        row["order_id"] = order_id
+    return row
+
+
+def test_plan_live_tickets_room_is_cap_minus_fills_not_pending():
+    from daytrade.fib5 import plan_live_tickets
+
+    held = {"AMD", "BXP"}
+    pending = [_ticket(f"P{i:02d}", entry=102, stop=99, target=105, order_id=f"o{i}") for i in range(14)]
+    setups = [_ticket("NEW", entry=100, stop=99, target=105)]
+    plan = plan_live_tickets(held=held, setups=setups, pending=pending, cap=16)
+    assert plan["room"] == 14
+    assert any(t["symbol"] == "NEW" for t in plan["place"])
+
+
+def test_plan_live_tickets_replaces_weak_pending_with_better_rr():
+    from daytrade.fib5 import plan_live_tickets
+
+    weak = _ticket("WEAK", entry=102, stop=99, target=105, order_id="w1")
+    strong = _ticket("STRG", entry=100, stop=99, target=105)
+    plan = plan_live_tickets(held=set(), setups=[strong], pending=[weak], cap=1)
+    assert [t["symbol"] for t in plan["place"]] == ["STRG"]
+    assert [t["symbol"] for t in plan["cancel"]] == ["WEAK"]
+
+
+def test_plan_live_tickets_keeps_pending_already_in_top_slots():
+    from daytrade.fib5 import plan_live_tickets
+
+    pending = _ticket("KEEP", entry=100, stop=99, target=105, order_id="k1")
+    other = _ticket("SKIP", entry=102, stop=99, target=105)
+    plan = plan_live_tickets(held=set(), setups=[pending, other], pending=[pending], cap=1)
+    assert plan["place"] == []
+    assert plan["cancel"] == []
+    assert [t["symbol"] for t in plan["keep"]] == ["KEEP"]
+
+
+def test_plan_live_tickets_full_book_places_nothing():
+    from daytrade.fib5 import plan_live_tickets
+
+    held = {f"H{i}" for i in range(16)}
+    plan = plan_live_tickets(
+        held=held,
+        setups=[_ticket("NEW", entry=100, stop=99, target=105)],
+        pending=[],
+        cap=16,
+    )
+    assert plan["room"] == 0
+    assert plan["place"] == []
+
+
+def test_entry_parent_ignores_bracket_legs():
+    from daytrade.broker import is_entry_parent
+
+    class _O:
+        def __init__(self, parent_id):
+            self.parent_id = parent_id
+
+    assert is_entry_parent(_O(None)) is True
+    assert is_entry_parent(_O("parent-1")) is False
+
+
+def test_last_closed_htf_uses_finished_30m_only():
+    from daytrade.fib5 import last_closed_htf_color
+
+    rows = [_ohlc(100, 101, 99, 100.8)] * 6  # 09:30-09:55 green 30m
+    rows += [_ohlc(100.8, 100.9, 100.0, 100.2)]  # 10:00 still in next 30m
+    df = _frame(rows)
+    assert last_closed_htf_color(df, df.index[-1], minutes=30) == 1
+    early = _frame(rows[:4])
+    assert last_closed_htf_color(early, early.index[-1], minutes=30) is None
+
+
+def test_htf_allows_only_same_color_as_impulse():
+    from daytrade.fib5 import htf_allows
+
+    assert htf_allows("LONG", 1) and not htf_allows("LONG", -1)
+    assert htf_allows("SHORT", -1) and not htf_allows("SHORT", 1)
+    assert not htf_allows("LONG", None)
+
+
+def test_aligned_long_setup_passes_closed_30m_filter():
+    from daytrade.fib5 import current_setup
+
+    rows = _bullish_setup()[:-2]
+    setup = current_setup(_frame(rows), FibConfig(level=0.5, min_range=0, htf_minutes=30))
+    assert setup is not None
+    assert setup["side"] == "LONG"
+
+
+def test_htf_blocks_short_when_closed_30m_is_green():
+    from daytrade.fib5 import current_setup
+
+    greens = [
+        _ohlc(100 + i * 0.2, 100.3 + i * 0.2, 99.8 + i * 0.2, 100.2 + i * 0.2)
+        for i in range(6)
+    ]
+    short_leg = [
+        _ohlc(100.5, 100.6, 99.0, 99.2),
+        _ohlc(99.2, 99.3, 98.0, 98.2),
+        _ohlc(98.2, 98.3, 97.0, 97.2),
+        _ohlc(97.2, 97.3, 96.0, 96.2),
+        _ohlc(96.2, 96.3, 95.0, 95.2),
+        _ohlc(95.4, 96.5, 95.3, 96.4),
+    ]
+    rows = greens + short_leg
+    blocked = current_setup(_frame(rows), FibConfig(level=0.5, min_range=0, htf_minutes=30))
+    allowed = current_setup(_frame(rows), FibConfig(level=0.5, min_range=0, htf_minutes=0))
+    assert blocked is None
+    assert allowed is not None
+    assert allowed["side"] == "SHORT"

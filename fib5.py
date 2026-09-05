@@ -25,10 +25,10 @@ from daytrade.fib5 import (
     NO_ENTRY,
     SWEEP_LEVELS,
     FibConfig,
-    actual_rr,
     choose_level,
     current_setup,
     median_bar_time,
+    plan_live_tickets,
     robustness_report,
     select_portfolio,
     simulate_symbol,
@@ -127,6 +127,7 @@ def run_optimize(args) -> None:
             min_range=args.min_range,
             use_ema=args.ema_filter,
             notional=args.notional,
+            htf_minutes=0 if args.no_htf else args.htf_minutes,
         )
         trades = []
         for i, (symbol, df) in enumerate(frames.items(), start=1):
@@ -194,6 +195,7 @@ def run_backtest(args) -> None:
         use_ema=args.ema_filter,
         notional=args.notional,
         fill_at_limit=args.fill_at_limit,
+        htf_minutes=0 if args.no_htf else args.htf_minutes,
     )
     symbols = _universe(args.universe_size)
     print(
@@ -251,6 +253,7 @@ def _cfg(args) -> FibConfig:
         use_ema=args.ema_filter,
         notional=args.notional,
         fill_at_limit=args.fill_at_limit,
+        htf_minutes=0 if args.no_htf else args.htf_minutes,
     )
 
 
@@ -280,18 +283,20 @@ def run_cycle(client, cfg: FibConfig, args) -> None:
     cap = args.max_positions or 16
 
     if mtc is not None and mtc <= FLATTEN:
-        if positions:
-            print(f"Flatten window -- closing {len(positions)} position(s).")
-            if args.live_paper:
-                try:
+        if args.live_paper:
+            try:
+                if positions:
+                    print(f"Flatten window -- closing {len(positions)} position(s).")
                     broker.close_all_positions(client)
-                    broker.cancel_open_orders(client)
-                except Exception as e:
-                    print(f"  flatten failed: {e}")
-                    return
-            for symbol, pos in positions.items():
-                _log(symbol, "flatten", pos["current_price"],
-                     "FLATTEN" if args.live_paper else "FLATTEN_DRY_RUN", args.live_paper)
+                broker.cancel_open_orders(client)
+            except Exception as e:
+                print(f"  flatten failed: {e}")
+                return
+        elif positions:
+            print(f"Flatten window -- closing {len(positions)} position(s).")
+        for symbol, pos in positions.items():
+            _log(symbol, "flatten", pos["current_price"],
+                 "FLATTEN" if args.live_paper else "FLATTEN_DRY_RUN", args.live_paper)
         return
 
     if mtc is not None and mtc <= NO_ENTRY:
@@ -311,20 +316,17 @@ def run_cycle(client, cfg: FibConfig, args) -> None:
         print("  Alpaca IEX download failed")
         return
 
-    open_orders = set()
+    pending = []
     if args.live_paper:
         try:
-            open_orders = broker.get_open_order_symbols(client)
+            pending = broker.get_open_entry_orders(client)
         except Exception as e:
             print(f"  open orders lookup failed: {e}")
 
     held = set(positions)
-    pending_yahoo = {s.replace(".", "-") for s in open_orders}
-    slots_used = len(held | pending_yahoo)
-
     setups = []
     for symbol in scan:
-        if symbol in held or symbol in pending_yahoo:
+        if symbol in held:
             continue
         df = frames.get(symbol)
         if df is None or df.empty:
@@ -343,20 +345,26 @@ def run_cycle(client, cfg: FibConfig, args) -> None:
             "target": float(setup["target"]),
         })
 
-    setups.sort(
-        key=lambda t: (
-            -actual_rr(t),
-            -abs(t["stop"] - t["target"]),
-            t["symbol"],
-        )
-    )
-    room = max(0, cap - slots_used)
+    plan = plan_live_tickets(held=held, setups=setups, pending=pending, cap=cap)
     if pdt_blocked:
         print("  PDT blocked -- no new entries.")
-        room = 0
-    chosen = setups[:room]
+        plan = plan_live_tickets(held=held, setups=[], pending=pending, cap=cap)
+    room = plan["room"]
+
+    if args.live_paper:
+        for ticket in plan["cancel"]:
+            try:
+                broker.cancel_order(client, ticket["order_id"])
+                print(f"  cancel weaker pending {ticket['symbol']}")
+            except Exception as e:
+                print(f"  cancel {ticket['symbol']} failed: {e}")
+
+    chosen = plan["place"]
     if not chosen:
-        print(f"  setups={len(setups)} held={len(held)} pending={len(pending_yahoo)} room={room}")
+        print(
+            f"  setups={len(setups)} held={len(held)} pending={len(pending)} "
+            f"keep={len(plan['keep'])} room={room}"
+        )
         return
 
     for setup in chosen:
@@ -394,7 +402,8 @@ def run_trade(args) -> None:
     mode = "LIVE PAPER" if args.live_paper else "DRY RUN"
     print(
         f"Fib 5-candle {cfg.level:.1%} | {mode} | notional=${cfg.notional:.0f} | "
-        f"cap={cap} | cash=${acct['cash']:.2f} equity=${acct['equity']:.2f}"
+        f"cap={cap} fills | 30m={'off' if not cfg.htf_minutes else str(cfg.htf_minutes)+'m'} | "
+        f"cash=${acct['cash']:.2f} equity=${acct['equity']:.2f}"
     )
     print("Paper only. Ctrl+C to stop.")
     try:
@@ -431,6 +440,9 @@ def main() -> None:
     p.add_argument("--fill-at-limit", action="store_true")
     p.add_argument("--notional", type=float, default=3500.0)
     p.add_argument("--max-positions", type=int, default=None)
+    p.add_argument("--htf-minutes", type=int, default=30)
+    p.add_argument("--no-htf", action="store_true",
+                   help="Disable the closed higher-timeframe color filter")
     p.add_argument("--out", default="data/fib5_backtest.json")
     p.add_argument(
         "--robust",

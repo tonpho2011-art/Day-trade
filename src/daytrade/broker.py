@@ -143,9 +143,32 @@ def safe_bracket_limit(
         return False, str(e)
 
 
+def is_entry_parent(order) -> bool:
+    """True for the resting entry; False for stop/take-profit child legs."""
+    return getattr(order, "parent_id", None) in (None, "")
+
+
 def get_open_order_symbols(client: TradingClient) -> set[str]:
     req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
     return {o.symbol for o in client.get_orders(req)}
+
+
+def get_open_entry_orders(client: TradingClient) -> list[dict]:
+    """Unfilled entry parents only (Yahoo-style symbol, order id)."""
+    req = GetOrdersRequest(status=QueryOrderStatus.OPEN)
+    out = []
+    for order in client.get_orders(req):
+        if not is_entry_parent(order):
+            continue
+        out.append({
+            "symbol": str(order.symbol).replace(".", "-"),
+            "order_id": str(order.id),
+        })
+    return out
+
+
+def cancel_order(client: TradingClient, order_id: str) -> None:
+    client.cancel_order_by_id(order_id)
 
 
 def cancel_open_orders(client: TradingClient) -> None:
